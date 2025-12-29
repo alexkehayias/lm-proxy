@@ -39,11 +39,10 @@ impl ProxyService {
         // Prepare headers - filter out hop-by-hop headers
         let mut filtered_headers = http::HeaderMap::new();
         for (name, value) in headers {
-            if let Some(name) = name {
-                if !is_hop_by_hop_header(&name) {
+            if let Some(name) = name
+                && !is_hop_by_hop_header(&name) {
                     filtered_headers.insert(name, value);
                 }
-            }
         }
 
         // Forward the request
@@ -73,23 +72,30 @@ impl ProxyService {
             .headers()
             .get(http::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok());
-        let is_streaming = content_type.map_or(false, |ct| ct.contains("text/event-stream"));
+        let is_streaming = content_type.is_some_and(|ct| ct.contains("text/event-stream"));
 
         // For streaming responses: track in the stream
         let upstream_stream = Box::pin(upstream_response.bytes_stream().map(move |result| {
-            if tracking_usage && is_streaming {
-                match &result {
-                    Ok(chunk) => {
-                        let text = std::str::from_utf8(chunk).ok();
-                        if let Some(t) = text {
-                            if let Some(usage) = models::try_parse_usage_from_chunk(t) {
+            if tracking_usage && is_streaming
+                && let Ok(chunk) = &result {
+                    let text = std::str::from_utf8(chunk).ok();
+
+                    if let Some(t) = text {
+                        // OpenAI's SSE format prefixes each json
+                        // chunk with `data:`
+                        let t = t.trim();
+                        let t = t.strip_prefix("data: ");
+
+                        // Usage data will only appear in the
+                        // final chunk where requests have
+                        // `{"include_usage": true}` in
+                        // `stream_options`
+                        if let Some(data) = t
+                            && let Some(usage) = models::try_parse_usage_from_chunk(data) {
                                 log::info!("[USAGE] {}", usage.log_format());
                             }
-                        }
                     }
-                    _ => {}
                 };
-            }
             result.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
         }));
 
