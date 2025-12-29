@@ -1,0 +1,22 @@
+[package]
+name = "lm-proxy"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["stream"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+hyper = { version = "1", features = ["full"] }
+tower = { version = "0.5", features = ["util"] }
+
+# Additional dependencies
+bytes = "1"
+futures-util = "0.3"
+log = "0.4"
+env_logger = "0.11"
+
+[dev-dependencies]
+mockito = "1.6.1"
