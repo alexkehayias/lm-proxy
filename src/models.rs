@@ -129,9 +129,10 @@ pub fn try_parse_usage_from_body(body: &[u8]) -> Option<Usage> {
     None
 }
 
-/// Check if a request path should have usage tracked (completions/embeddings)
+/// Check if a request path should have usage tracked (completions/embeddings/responses)
 pub fn is_usage_tracked_path(path: &str) -> bool {
     path.contains("/chat/completions")
         || path.ends_with("completions")
         || path.ends_with("/embeddings")
+        || path.contains("/responses")
 }

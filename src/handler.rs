@@ -74,6 +74,20 @@ impl ProxyService {
             .and_then(|v| v.to_str().ok());
         let is_streaming = content_type.is_some_and(|ct| ct.contains("text/event-stream"));
 
+        // Handle non-streaming responses
+        if !is_streaming && tracking_usage {
+            let body_bytes = upstream_response.bytes().await.map_err(|e| {
+                Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+            })?;
+
+            if let Some(usage) = models::try_parse_usage_from_body(&body_bytes) {
+                log::info!("[USAGE] {}", usage.log_format());
+            }
+
+            let body = Body::from(body_bytes);
+            return Ok(builder.body(body).unwrap());
+        }
+
         // For streaming responses: track in the stream
         let upstream_stream = Box::pin(upstream_response.bytes_stream().map(move |result| {
             if tracking_usage && is_streaming
