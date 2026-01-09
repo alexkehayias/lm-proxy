@@ -82,6 +82,31 @@ impl ProxyService {
 
             if let Some(usage) = models::try_parse_usage_from_body(&body_bytes) {
                 log::info!("[USAGE] {}", usage.log_format());
+                if let (Some(total_tokens), Some(url)) = (usage.total_tokens, self.config.metrics_url.clone()) {
+                    let client = self.client.clone();
+                    tokio::spawn(async move {
+                        #[derive(serde::Serialize)]
+                        struct MetricsPayload {
+                            name: String,
+                            value: u32,
+                        }
+
+                        let payload = MetricsPayload {
+                            name: "token-count".to_string(),
+                            value: total_tokens,
+                        };
+
+                        if let Err(e) = client
+                            .post(&url)
+                            .json(&payload)
+                            .send()
+                            .await
+                            .map(|r| r.error_for_status())
+                        {
+                            log::warn!("Failed to post metrics: {}", e);
+                        }
+                    });
+                }
             }
 
             let body = Body::from(body_bytes);
@@ -89,6 +114,9 @@ impl ProxyService {
         }
 
         // For streaming responses: track in the stream
+        let client = self.client.clone();
+        let metrics_url = self.config.metrics_url.clone();
+
         let upstream_stream = Box::pin(upstream_response.bytes_stream().map(move |result| {
             if tracking_usage && is_streaming
                 && let Ok(chunk) = &result {
@@ -107,6 +135,31 @@ impl ProxyService {
                         if let Some(data) = t
                             && let Some(usage) = models::try_parse_usage_from_chunk(data) {
                                 log::info!("[USAGE] {}", usage.log_format());
+                                if let (Some(total_tokens), Some(url)) = (usage.total_tokens, metrics_url.clone()) {
+                                    let client_clone = client.clone();
+                                    tokio::spawn(async move {
+                                        #[derive(serde::Serialize)]
+                                        struct MetricsPayload {
+                                            name: String,
+                                            value: u32,
+                                        }
+
+                                        let payload = MetricsPayload {
+                                            name: "token-count".to_string(),
+                                            value: total_tokens,
+                                        };
+
+                                        if let Err(e) = client_clone
+                                            .post(&url)
+                                            .json(&payload)
+                                            .send()
+                                            .await
+                                            .map(|r| r.error_for_status())
+                                        {
+                                            log::warn!("Failed to post metrics: {}", e);
+                                        }
+                                    });
+                                }
                             }
                     }
                 };

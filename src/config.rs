@@ -5,6 +5,7 @@ use std::str::FromStr;
 pub struct Config {
     pub upstream_url: String,
     pub listen_addr: SocketAddr,
+    pub metrics_url: Option<String>,
 }
 
 impl Default for Config {
@@ -16,6 +17,7 @@ impl Default for Config {
                 .ok()
                 .and_then(|addr| SocketAddr::from_str(&addr).ok())
                 .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 3000))),
+            metrics_url: std::env::var("METRICS_URL").ok(),
         }
     }
 }
@@ -47,6 +49,10 @@ pub struct Args {
     /// Port to listen on
     #[arg(short, long, default_value_t = 3000)]
     pub port: u16,
+
+    /// URL to post usage metrics (e.g., http://localhost:8080/metrics)
+    #[arg(long)]
+    pub metrics_url: Option<String>,
 }
 
 impl Args {
@@ -58,6 +64,7 @@ impl Args {
         Ok(Config {
             upstream_url: self.upstream,
             listen_addr,
+            metrics_url: self.metrics_url,
         })
     }
 }
@@ -71,6 +78,7 @@ mod tests {
         let config = Config {
             upstream_url: "https://api.openai.com/v1".to_string(),
             listen_addr: SocketAddr::from(([0, 0, 0, 0], 3000)),
+            metrics_url: None,
         };
 
         assert_eq!(
@@ -81,6 +89,7 @@ mod tests {
         let config2 = Config {
             upstream_url: "http://localhost:8080/v1".to_string(),
             listen_addr: SocketAddr::from(([0, 0, 0, 0], 3000)),
+            metrics_url: None,
         };
 
         assert_eq!(
