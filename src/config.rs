@@ -8,24 +8,7 @@ pub struct Config {
     pub metrics_url: Option<String>,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            upstream_url: std::env::var("UPSTREAM_URL")
-                .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
-            listen_addr: std::env::var("LISTEN_ADDR")
-                .ok()
-                .and_then(|addr| SocketAddr::from_str(&addr).ok())
-                .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 3000))),
-            metrics_url: std::env::var("METRICS_URL").ok(),
-        }
-    }
-}
-
 impl Config {
-    pub fn from_env() -> Self {
-        Self::default()
-    }
 
     /// Returns the full URL for a given API path (e.g., "/chat/completions")
     pub fn upstream_url_for_path(&self, path: &str) -> String {

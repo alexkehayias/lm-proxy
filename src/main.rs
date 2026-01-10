@@ -3,34 +3,17 @@ mod handler;
 mod models;
 
 use axum::{routing::any, Router};
+use axum::extract::State;
 use axum::response::IntoResponse;
 use clap::Parser;
 use config::{Args, Config};
 use handler::ProxyService;
 use futures_util::StreamExt;
 
-static PROXY_SERVICE: tokio::sync::OnceCell<ProxyService> = tokio::sync::OnceCell::const_new();
-static CONFIG: std::sync::OnceLock<Config> = std::sync::OnceLock::new();
-
 async fn proxy_handler(
+    State(proxy): State<ProxyService>,
     mut req: axum::extract::Request,
 ) -> axum::response::Response {
-    let config = CONFIG.get().expect("Config not initialized");
-    let proxy = match PROXY_SERVICE
-        .get_or_try_init(|| async {
-            Ok::<ProxyService, Box<dyn std::error::Error + Send + Sync>>(
-                ProxyService::new(reqwest::Client::new(), config.clone())
-            )
-        })
-        .await
-    {
-        Ok(p) => p,
-        Err(e) => {
-            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to init proxy: {}", e))
-                .into_response();
-        }
-    };
-
     let method = req.method().clone();
     let uri = req.uri().clone();
     let headers = std::mem::take(req.headers_mut());
@@ -57,8 +40,7 @@ async fn proxy_handler(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    let config = args.into_config()?;
-    CONFIG.set(config.clone()).expect("Failed to set global config");
+    let config: Config = args.into_config()?;
 
     env_logger::init();
     log::info!("Starting lm-proxy...");
@@ -68,8 +50,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.listen_addr
     );
 
+    let proxy = ProxyService::new(reqwest::Client::new(), config.clone());
+
     let app = Router::new()
-        .route("/{*path}", any(proxy_handler));
+        .route("/{*path}", any(proxy_handler))
+        .with_state(proxy);
 
     let addr = config.listen_addr;
     log::info!("Listening on {}", addr);
