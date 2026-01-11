@@ -74,7 +74,14 @@ impl ProxyService {
         headers: http::HeaderMap<http::HeaderValue>,
         body_bytes: Vec<u8>,
     ) -> Result<reqwest::Response, Box<dyn std::error::Error + Send + Sync>> {
-        let mut request = self.client.request(method, url).headers(headers);
+        let mut request = self.client.request(method, url);
+
+        // Apply headers but skip the Host header so reqwest sets it correctly from the URL
+        for (name, value) in headers {
+            if let Some(name) = name && name != http::header::HOST {
+                request = request.header(name, value);
+            }
+        }
 
         if !body_bytes.is_empty() {
             request = request.body(body_bytes);
