@@ -9,6 +9,7 @@ use clap::Parser;
 use config::{Args, Config};
 use handler::ProxyService;
 use futures_util::StreamExt;
+use tokio::signal::unix::{SignalKind, signal};
 
 async fn proxy_handler(
     State(proxy): State<ProxyService>,
@@ -37,6 +38,28 @@ async fn proxy_handler(
     }
 }
 
+// Copied from https://github.com/rust-lang/crates.io/blob/8969c10c46e5ed0afece2444f5445fc59aa64565/src/bin/server.rs#L83-L112
+async fn shutdown_signal() {
+    let interrupt = async {
+        signal(SignalKind::interrupt())
+            .expect("failed to install signal handler")
+            .recv()
+            .await;
+    };
+
+    let terminate = async {
+        signal(SignalKind::terminate())
+            .expect("failed to install signal handler")
+            .recv()
+            .await;
+    };
+
+    tokio::select! {
+        _ = interrupt => {},
+        _ = terminate => {},
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
@@ -60,6 +83,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("Listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
     Ok(())
 }
