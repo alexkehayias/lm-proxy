@@ -37,6 +37,12 @@ The proxy is configured via environment variables:
 | `UPSTREAM_URL` | `https://api.openai.com/v1` | The base URL of the upstream API to proxy requests to |
 | `LISTEN_ADDR`  | `0.0.0.0:3000`              | The address and port the proxy should listen on       |
 
+## Running behind Nginx
+
+If you run a reverse proxy in front of `lm-proxy`:
+- Set the `max_body_size` to `10m` or higher (default is `1m`) depending on expected usage
+- Set `proxy_buffering` to `off` to avoid malformed SSE events
+
 ### Example
 
 ```bash

@@ -99,7 +99,7 @@ impl ProxyService {
 
         if let Some(usage) = models::try_parse_usage_from_body(&body_bytes) {
             log::info!("[USAGE] {}", usage.log_format());
-            if let Some(total_tokens) = usage.total_tokens {
+            if let Some(total_tokens) = usage.total() {
                 self.post_metrics_if_configured(total_tokens);
             }
         }
@@ -122,7 +122,7 @@ impl ProxyService {
                 && let Some(usage) = parse_usage_from_sse_chunk(chunk)
             {
                 log::info!("[USAGE] {}", usage.log_format());
-                if let Some(total_tokens) = usage.total_tokens {
+                if let Some(total_tokens) = usage.total() {
                     post_metrics_async(client.clone(), metrics_url.clone(), total_tokens);
                 }
             }
