@@ -1,0 +1,6 @@
+[test_config]
+skip-clean = true
+color = "Auto"
+exclude-files = [
+  "src/main.rs",
+]

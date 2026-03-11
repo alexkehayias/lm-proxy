@@ -8,9 +8,11 @@ A Rust-based HTTP proxy server that forwards requests to upstream APIs (such as 
 
 - **Request Proxying**: Forwards any HTTP request (GET, POST, PUT, DELETE, etc.) to an upstream API
 - **Usage Tracking**: Automatically monitors and logs usage statistics (prompt tokens, completion tokens, total tokens) from:
-  - Chat completion endpoints
-  - Regular completion endpoints
-  - Embedding endpoints
+  - OpenAI chat completion endpoints
+  - OpenAI completion endpoints
+  - OpenAI embedding endpoints
+  - Anthropic `/v1/messages` API (both streaming and non-streaming)
+- **Metrics Posting**: Optionally posts token counts to an external metrics endpoint for aggregation
 - **Streaming Support**: Handles both streaming (SSE) and non-streaming responses correctly
 - **Header Filtering**: Automatically filters out hop-by-hop headers that shouldn't be forwarded
 - **Preserves Metadata**: Maintains HTTP methods, query parameters, and custom headers during proxying
@@ -30,12 +32,16 @@ cargo build --release
 
 ## Configuration
 
-The proxy is configured via environment variables:
+The proxy can be configured via command-line arguments:
 
-| Variable       | Default                     | Description                                           |
-|----------------|-----------------------------|-------------------------------------------------------|
-| `UPSTREAM_URL` | `https://api.openai.com/v1` | The base URL of the upstream API to proxy requests to |
-| `LISTEN_ADDR`  | `0.0.0.0:3000`              | The address and port the proxy should listen on       |
+### Arguments
+
+| Flag            | Default                     | Description                                           |
+|-----------------|-----------------------------|-------------------------------------------------------|
+| `--upstream`    | `https://api.openai.com/v1` | The base URL of the upstream API to proxy requests to |
+| `--host`        | `0.0.0.0`                   | The host address the proxy should listen on           |
+| `--port`        | `3000`                      | The port the proxy should listen on                   |
+| `--metrics-url` | (none)                      | Optional URL to post usage metrics to                 |
 
 ## Running behind Nginx
 
@@ -50,7 +56,10 @@ If you run a reverse proxy in front of `lm-proxy`:
 cargo run
 
 # Proxy requests to a custom upstream server
-UPSTREAM_URL=http://localhost:8080/api LISTEN_ADDR=localhost:3000 cargo run
+cargo run --upstream http://localhost:8080/api --host localhost --port 3000
+
+# With metrics posting to an external endpoint
+cargo run --metrics-url http://localhost:8080/metrics
 ```
 
 ## Usage
@@ -94,6 +103,19 @@ Usage statistics are automatically logged for tracked endpoints. When processing
 ```
 [USAGE] prompt_tokens=10 completion_tokens=20 total_tokens=30
 ```
+
+#### Metrics Posting
+
+When `--metrics-url` is configured, the proxy will POST token counts to the specified endpoint after each request. The payload format is:
+
+```json
+{
+  "name": "token-count",
+  "value": 30
+}
+```
+
+This enables integration with external metrics aggregation systems. Metrics are posted asynchronously (fire-and-forget) to avoid impacting request latency.
 
 ## Development
 
@@ -147,7 +169,7 @@ The proxy server follows a simple request forwarding architecture:
 2. **Processing**:
    - Extracts method, URI, headers, and body from the request
    - Filters out hop-by-hop headers (connection, keep-alive, transfer-encoding, etc.)
-   - Constructs the upstream URL by combining `UPSTREAM_URL` with the request path
+   - Constructs the upstream URL by combining the configured upstream URL with the request path
 3. **Forwarding**: Uses reqwest HTTP client to forward the request to upstream
 4. **Response Handling**:
    - For non-streaming responses: Tracks usage from response body if applicable

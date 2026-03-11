@@ -115,7 +115,7 @@ pub struct AnthropicMessageResponse {
 }
 
 /// Anthropic usage statistics (normalized to common Usage)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AnthropicUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u32>,
@@ -229,4 +229,188 @@ pub fn is_usage_tracked_path(path: &str) -> bool {
         || path.ends_with("/embeddings")
         || path.contains("/responses")
         || path.contains("/v1/messages")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_usage_log_format() {
+        let usage = Usage {
+            prompt_tokens: Some(100),
+            completion_tokens: Some(50),
+            total_tokens: Some(150),
+        };
+        assert_eq!(
+            usage.log_format(),
+            "prompt_tokens=Some(100) completion_tokens=Some(50) total_tokens=Some(150)"
+        );
+    }
+
+    #[test]
+    fn test_usage_log_format_with_none() {
+        let usage = Usage::default();
+        assert_eq!(
+            usage.log_format(),
+            "prompt_tokens=None completion_tokens=None total_tokens=None"
+        );
+    }
+
+    #[test]
+    fn test_usage_total_with_explicit_total() {
+        let usage = Usage {
+            prompt_tokens: Some(100),
+            completion_tokens: Some(50),
+            total_tokens: Some(150),
+        };
+        assert_eq!(usage.total(), Some(150));
+    }
+
+    #[test]
+    fn test_usage_total_calculated_from_prompt_and_completion() {
+        let usage = Usage {
+            prompt_tokens: Some(100),
+            completion_tokens: Some(50),
+            total_tokens: None,
+        };
+        assert_eq!(usage.total(), Some(150));
+    }
+
+    #[test]
+    fn test_usage_total_with_only_prompt() {
+        let usage = Usage {
+            prompt_tokens: Some(100),
+            completion_tokens: None,
+            total_tokens: None,
+        };
+        assert_eq!(usage.total(), None);
+    }
+
+    #[test]
+    fn test_usage_total_with_only_completion() {
+        let usage = Usage {
+            prompt_tokens: None,
+            completion_tokens: Some(50),
+            total_tokens: None,
+        };
+        assert_eq!(usage.total(), None);
+    }
+
+    #[test]
+    fn test_anthropic_usage_normalize() {
+        let anthropic_usage = AnthropicUsage {
+            input_tokens: Some(200),
+            output_tokens: Some(100),
+            cache_hit_input_tokens: None,
+            cache_miss_input_tokens: None,
+            speculative_token_count: None,
+        };
+
+        let normalized = anthropic_usage.normalize();
+        assert_eq!(normalized.prompt_tokens, Some(200));
+        assert_eq!(normalized.completion_tokens, Some(100));
+        assert_eq!(normalized.total_tokens, Some(300));
+    }
+
+    #[test]
+    fn test_anthropic_usage_normalize_with_none() {
+        let anthropic_usage = AnthropicUsage::default();
+        let normalized = anthropic_usage.normalize();
+        assert_eq!(normalized.prompt_tokens, None);
+        assert_eq!(normalized.completion_tokens, None);
+        assert_eq!(normalized.total_tokens, None);
+    }
+
+    #[test]
+    fn test_is_usage_tracked_path_chat_completions() {
+        assert!(is_usage_tracked_path("/v1/chat/completions"));
+        assert!(is_usage_tracked_path("https://api.example.com/v1/chat/completions"));
+    }
+
+    #[test]
+    fn test_is_usage_tracked_path_completions() {
+        assert!(is_usage_tracked_path("/v1/completions"));
+        assert!(is_usage_tracked_path("completions"));
+    }
+
+    #[test]
+    fn test_is_usage_tracked_path_embeddings() {
+        assert!(is_usage_tracked_path("/v1/embeddings"));
+        assert!(is_usage_tracked_path("https://api.example.com/v1/embeddings"));
+    }
+
+    #[test]
+    fn test_is_usage_tracked_path_responses() {
+        assert!(is_usage_tracked_path("/v1/responses"));
+        assert!(is_usage_tracked_path("https://api.example.com/v1/responses"));
+    }
+
+    #[test]
+    fn test_is_usage_tracked_path_anthropic_messages() {
+        assert!(is_usage_tracked_path("/v1/messages"));
+        assert!(is_usage_tracked_path("https://api.anthropic.com/v1/messages"));
+    }
+
+    #[test]
+    fn test_is_usage_tracked_path_non_tracked() {
+        assert!(!is_usage_tracked_path("/v1/models"));
+        assert!(!is_usage_tracked_path("/health"));
+        assert!(!is_usage_tracked_path(""));
+    }
+
+    #[test]
+    fn test_try_parse_usage_from_chunk_openai_completion() {
+        let chunk = r#"data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1677652288,"model":"gpt-4","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#;
+
+        let usage = try_parse_usage_from_chunk(chunk);
+        assert!(usage.is_some());
+        let usage = usage.unwrap();
+        assert_eq!(usage.prompt_tokens, Some(10));
+        assert_eq!(usage.completion_tokens, Some(5));
+        assert_eq!(usage.total_tokens, Some(15));
+    }
+
+    #[test]
+    fn test_try_parse_usage_from_chunk_done() {
+        let chunk = "data: [DONE]";
+        let usage = try_parse_usage_from_chunk(chunk);
+        assert!(usage.is_none());
+    }
+
+    #[test]
+    fn test_try_parse_usage_from_chunk_no_usage() {
+        let chunk = r#"data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1677652288,"model":"gpt-4","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}"#;
+
+        let usage = try_parse_usage_from_chunk(chunk);
+        assert!(usage.is_none());
+    }
+
+    #[test]
+    fn test_try_parse_usage_from_body_openai_completion() {
+        let body = br#"{"id":"chatcmpl-123","object":"chat.completion","created":1677652288,"model":"gpt-4","choices":[{"index":0,"message":{"role":"assistant","content":"Hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#;
+
+        let usage = try_parse_usage_from_body(body);
+        assert!(usage.is_some());
+        let usage = usage.unwrap();
+        assert_eq!(usage.prompt_tokens, Some(10));
+        assert_eq!(usage.completion_tokens, Some(5));
+    }
+
+    #[test]
+    fn test_try_parse_usage_from_body_embeddings() {
+        let body = br#"{"object":"list","data":[{"object":"embedding","embedding":[0.1,0.2],"index":0}],"model":"text-embedding-ada-002","usage":{"prompt_tokens":8,"completion_tokens":0,"total_tokens":8}}"#;
+
+        let usage = try_parse_usage_from_body(body);
+        assert!(usage.is_some());
+        let usage = usage.unwrap();
+        assert_eq!(usage.prompt_tokens, Some(8));
+    }
+
+    #[test]
+    fn test_try_parse_usage_from_body_no_match() {
+        let body = br#"{"unknown":"response"}"#;
+        let usage = try_parse_usage_from_body(body);
+        assert!(usage.is_none());
+    }
 }
