@@ -8,12 +8,13 @@ use config::{Args, Config};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt::init();
+
     let args = Args::parse();
     let config: Config = args.into_config()?;
 
-    env_logger::init();
-    log::info!("Starting lm-proxy...");
-    log::info!(
+    tracing::info!("Starting lm-proxy...");
+    tracing::info!(
         "Proxy configured: upstream={} listen={}",
         config.upstream_url,
         config.listen_addr

@@ -98,7 +98,7 @@ impl ProxyService {
         let body_bytes = upstream_response.bytes().await?;
 
         if let Some(usage) = models::try_parse_usage_from_body(&body_bytes) {
-            log::info!("[USAGE] {}", usage.log_format());
+            tracing::info!("[USAGE] {}", usage.log_format());
             if let Some(total_tokens) = usage.total() {
                 self.post_metrics_if_configured(total_tokens);
             }
@@ -121,7 +121,7 @@ impl ProxyService {
                 && let Ok(chunk) = &result
                 && let Some(usage) = parse_usage_from_sse_chunk(chunk)
             {
-                log::info!("[USAGE] {}", usage.log_format());
+                tracing::info!("[USAGE] {}", usage.log_format());
                 if let Some(total_tokens) = usage.total() {
                     post_metrics_async(client.clone(), metrics_url.clone(), total_tokens);
                 }
@@ -199,7 +199,7 @@ fn post_metrics_async(client: reqwest::Client, url: Option<String>, total_tokens
                 .await
                 .map(|r| r.error_for_status())
             {
-                log::warn!("Failed to post metrics: {}", e);
+                tracing::warn!("Failed to post metrics: {}", e);
             }
         });
     }

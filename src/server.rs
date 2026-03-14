@@ -71,7 +71,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let app = create_router(proxy);
 
     let addr = config.listen_addr;
-    log::info!("Listening on {}", addr);
+    tracing::info!("Listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app)
