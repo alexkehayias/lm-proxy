@@ -173,13 +173,8 @@ fn is_hop_by_hop_header(name: &HeaderName) -> bool {
 /// Parse usage from an SSE chunk
 fn parse_usage_from_sse_chunk(chunk: &[u8]) -> Option<models::Usage> {
     let text = std::str::from_utf8(chunk).ok()?;
-    let text = text.trim().strip_prefix("data: ")?;
 
-    // Skip [DONE] marker
-    if text == "[DONE]" {
-        return None;
-    }
-
+    // Use the more robust parsing from models that handles both OpenAI and Anthropic SSE formats
     models::try_parse_usage_from_chunk(text)
 }
 
@@ -533,5 +528,23 @@ mod tests {
         let chunk = b"{\"usage\":{}}";
         let usage = parse_usage_from_sse_chunk(chunk);
         assert!(usage.is_none());
+    }
+
+    #[test]
+    fn test_parse_usage_from_sse_chunk_anthropic_message_start() {
+        // Anthropic streaming message_start event with event: prefix
+        let chunk = b"event: message_start\ndata: {\"type\": \"message_start\", \"message\": {\"id\": \"msg_1nZdL29xx5MUA1yADyHTEsnR8uuvGzszyY\", \"type\": \"message\", \"role\": \"assistant\", \"content\": [], \"model\": \"claude-opus-4-6\", \"stop_reason\": null, \"stop_sequence\": null, \"usage\": {\"input_tokens\": 25, \"output_tokens\": 1}}}";
+        let usage = parse_usage_from_sse_chunk(chunk);
+        assert!(usage.is_some());
+        assert_eq!(usage.unwrap().prompt_tokens, Some(25));
+    }
+
+    #[test]
+    fn test_parse_usage_from_sse_chunk_anthropic_message_delta() {
+        // Anthropic streaming message_delta event
+        let chunk = b"event: message_delta\ndata: {\"type\": \"message_delta\", \"delta\": {\"stop_reason\": \"end_turn\", \"stop_sequence\": null}, \"usage\": {\"output_tokens\": 15}}";
+        let usage = parse_usage_from_sse_chunk(chunk);
+        assert!(usage.is_some());
+        assert_eq!(usage.unwrap().completion_tokens, Some(15));
     }
 }

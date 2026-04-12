@@ -174,11 +174,41 @@ pub struct AnthropicDelta {
     pub text: Option<String>,
 }
 
+/// Anthropic message_start event - usage is nested in the message field
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnthropicMessageStartEvent {
+    pub r#type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<AnthropicMessageWithUsage>,
+}
+
+/// Anthropic message with usage
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnthropicMessageWithUsage {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<AnthropicUsage>,
+}
+
+/// Anthropic message_delta event - usage is at the top level
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnthropicMessageDeltaEvent {
+    pub r#type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<AnthropicUsage>,
+}
+
 /// Attempts to parse usage from a chunk of SSE data
 /// Returns None if the chunk doesn't contain usage (most chunks don't)
 pub fn try_parse_usage_from_chunk(chunk: &str) -> Option<Usage> {
-    // Skip SSE marker lines
-    let json = chunk.trim_start_matches("data: ");
+    // Handle SSE format: "event: <type>\ndata: <json>" or just "data: <json>"
+    let json = if let Some(pos) = chunk.find("\ndata: ") {
+        // Has event line, extract JSON after "data: "
+        &chunk[pos + 7..]
+    } else {
+        // No event line, just strip "data: " prefix
+        chunk.trim_start_matches("data: ")
+    };
 
     if json == "[DONE]" {
         return None;
@@ -194,7 +224,19 @@ pub fn try_parse_usage_from_chunk(chunk: &str) -> Option<Usage> {
         return response.usage;
     }
 
-    // Anthropic streaming
+    // Anthropic message_start event - usage is nested in message
+    if let Ok(event) = serde_json::from_str::<AnthropicMessageStartEvent>(json) {
+        if let Some(message) = event.message {
+            return message.usage.map(|u| u.normalize());
+        }
+    }
+
+    // Anthropic message_delta event - usage is at top level
+    if let Ok(event) = serde_json::from_str::<AnthropicMessageDeltaEvent>(json) {
+        return event.usage.map(|u| u.normalize());
+    }
+
+    // Legacy Anthropic streaming (for backwards compatibility)
     if let Ok(chunk) = serde_json::from_str::<AnthropicMessageChunk>(json) {
         return chunk.usage.map(|u| u.normalize());
     }
@@ -412,5 +454,30 @@ mod tests {
         let body = br#"{"unknown":"response"}"#;
         let usage = try_parse_usage_from_body(body);
         assert!(usage.is_none());
+    }
+
+    #[test]
+    fn test_try_parse_usage_from_chunk_anthropic_message_start() {
+        // Anthropic streaming message_start event
+        let chunk = r#"event: message_start
+data: {"type": "message_start", "message": {"id": "msg_1nZdL29xx5MUA1yADyHTEsnR8uuvGzszyY", "type": "message", "role": "assistant", "content": [], "model": "claude-opus-4-6", "stop_reason": null, "stop_sequence": null, "usage": {"input_tokens": 25, "output_tokens": 1}}}"#;
+
+        let usage = try_parse_usage_from_chunk(chunk);
+        assert!(usage.is_some(), "Should parse usage from Anthropic message_start event");
+        let usage = usage.unwrap();
+        assert_eq!(usage.prompt_tokens, Some(25), "input_tokens should be 25");
+        assert_eq!(usage.completion_tokens, Some(1), "output_tokens should be 1");
+    }
+
+    #[test]
+    fn test_try_parse_usage_from_chunk_anthropic_message_delta() {
+        // Anthropic streaming message_delta event with usage
+        let chunk = r#"event: message_delta
+data: {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": null}, "usage": {"output_tokens": 15}}"#;
+
+        let usage = try_parse_usage_from_chunk(chunk);
+        assert!(usage.is_some(), "Should parse usage from Anthropic message_delta event");
+        let usage = usage.unwrap();
+        assert_eq!(usage.completion_tokens, Some(15), "output_tokens should be 15");
     }
 }
