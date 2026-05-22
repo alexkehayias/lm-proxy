@@ -1,13 +1,16 @@
 use axum::body::to_bytes;
 use hyper::header::{HeaderMap, HeaderValue};
-use lm_proxy::config::Config;
+use lm_proxy::config::{Config, Upstream};
 use lm_proxy::handler::ProxyService;
 use reqwest::StatusCode;
 
 /// Helper function to create a test config with the mock server URL
 fn create_test_config(upstream_url: String) -> Config {
     Config {
-        upstream_url,
+        upstreams: vec![Upstream {
+            name: "default".to_string(),
+            url: upstream_url,
+        }],
         listen_addr: std::net::SocketAddr::from(([0, 0, 0, 0], 3000)),
         metrics_url: None,
     }

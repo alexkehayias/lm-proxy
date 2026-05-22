@@ -225,10 +225,10 @@ pub fn try_parse_usage_from_chunk(chunk: &str) -> Option<Usage> {
     }
 
     // Anthropic message_start event - usage is nested in message
-    if let Ok(event) = serde_json::from_str::<AnthropicMessageStartEvent>(json) {
-        if let Some(message) = event.message {
-            return message.usage.map(|u| u.normalize());
-        }
+    if let Ok(event) = serde_json::from_str::<AnthropicMessageStartEvent>(json)
+        && let Some(message) = event.message
+    {
+        return message.usage.map(|u| u.normalize());
     }
 
     // Anthropic message_delta event - usage is at top level

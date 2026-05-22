@@ -36,12 +36,44 @@ The proxy can be configured via command-line arguments:
 
 ### Arguments
 
-| Flag            | Default                     | Description                                           |
-|-----------------|-----------------------------|-------------------------------------------------------|
-| `--upstream`    | `https://api.openai.com/v1` | The base URL of the upstream API to proxy requests to |
-| `--host`        | `0.0.0.0`                   | The host address the proxy should listen on           |
-| `--port`        | `3000`                      | The port the proxy should listen on                   |
-| `--metrics-url` | (none)                      | Optional URL to post usage metrics to                 |
+| Flag            | Default                     | Description                                                      |
+|-----------------|-----------------------------|------------------------------------------------------------------|
+| `--upstream`    | `https://api.openai.com/v1` | Repeatable: `name=url` or bare URL. See examples below.          |
+| `--host`        | `0.0.0.0`                   | The host address the proxy should listen on                      |
+| `--port`        | `3000`                      | The port the proxy should listen on                              |
+| `--metrics-url` | (none)                      | Optional URL to post usage metrics to                            |
+
+### Multi-Upstream Routing
+
+When multiple `--upstream` values are configured, the proxy routes requests based on the first path segment:
+
+```bash
+# Configure two upstreams
+cargo run -- \
+  --upstream openai=https://api.openai.com/v1 \
+  --upstream anthropic=https://api.anthropic.com/v1
+```
+
+Requests are then routed as follows:
+
+```
+POST /openai/chat/completions     →  https://api.openai.com/v1/chat/completions
+POST /anthropic/v1/messages       →  https://api.anthropic.com/v1/messages
+```
+
+If no upstream name prefix matches, the proxy falls back to an upstream named `"default"`, or the single configured upstream if there is exactly one.
+
+#### Backward Compatibility
+
+Single `--upstream` usage works exactly as before:
+
+```bash
+# Single unnamed upstream → name is "default"
+cargo run -- --upstream https://api.openai.com/v1
+
+# No --upstream → defaults to --upstream default=https://api.openai.com/v1
+cargo run
+```
 
 ## Running behind Nginx
 
@@ -49,17 +81,23 @@ If you run a reverse proxy in front of `lm-proxy`:
 - Set the `max_body_size` to `10m` or higher (default is `1m`) depending on expected usage
 - Set `proxy_buffering` to `off` to avoid malformed SSE events
 
-### Example
+### Examples
 
 ```bash
 # Proxy requests to OpenAI's API (default)
 cargo run
 
 # Proxy requests to a custom upstream server
-cargo run --upstream http://localhost:8080/api --host localhost --port 3000
+cargo run -- --upstream http://localhost:8080/api --host localhost --port 3000
 
 # With metrics posting to an external endpoint
-cargo run --metrics-url http://localhost:8080/metrics
+cargo run -- --metrics-url http://localhost:8080/metrics
+
+# Multiple upstreams (path-based routing)
+cargo run -- \
+  --upstream openai=https://api.openai.com/v1 \
+  --upstream anthropic=https://api.anthropic.com/v1 \
+  --upstream ollama=http://localhost:11434/v1
 ```
 
 ## Usage
@@ -74,7 +112,9 @@ The server will start listening on the configured address (default: `http://0.0.
 
 ### Making Requests
 
-All requests to the proxy are forwarded to the upstream API, preserving the path:
+All requests to the proxy are forwarded to the upstream API, preserving the path.
+
+With a single upstream (backward compatible), the path is forwarded as-is:
 
 ```bash
 # Proxy a chat completion request (with usage tracking)
@@ -85,14 +125,28 @@ curl -X POST http://localhost:3000/v1/chat/completions \
     "model": "gpt-4",
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
+```
 
-# Proxy an embeddings request (with usage tracking)
-curl -X POST http://localhost:3000/v1/embeddings \
+With multiple upstreams, prefix the path with the upstream name:
+
+```bash
+# Route to the "openai" upstream
+curl -X POST http://localhost:3000/openai/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -d '{
-    "model": "text-embedding-ada-002",
-    "input": "Hello world"
+    "model": "gpt-4",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+
+# Route to the "anthropic" upstream
+curl -X POST http://localhost:3000/anthropic/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: YOUR_ANTHROPIC_KEY" \
+  -d '{
+    "model": "claude-sonnet-4-6",
+    "max_tokens": 1024,
+    "messages": [{"role": "user", "content": "Hello!"}]
   }'
 ```
 
@@ -195,7 +249,8 @@ When serving requests with usage tracking:
 
 ```
 [INFO] Starting lm-proxy...
-[INFO] Proxy configured: upstream=https://api.openai.com/v1 listen=0.0.0.0:3000
+[INFO] Upstream configured: name=openai url=https://api.openai.com/v1
+[INFO] Upstream configured: name=anthropic url=https://api.anthropic.com/v1
 [INFO] Listening on 0.0.0.0:3000
 [USAGE] prompt_tokens=15 completion_tokens=42 total_tokens=57
 ```

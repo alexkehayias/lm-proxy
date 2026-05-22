@@ -1,11 +1,9 @@
 //! Integration tests that exercise main.rs code paths through HTTP server
 use axum::{routing::any, Router};
-use axum::body::to_bytes;
 use axum::extract::State;
 use axum::response::IntoResponse;
 use futures_util::StreamExt;
-use hyper::header::{HeaderMap, HeaderValue};
-use lm_proxy::config::Config;
+use lm_proxy::config::{Config, Upstream};
 use lm_proxy::handler::ProxyService;
 use reqwest::StatusCode;
 use std::net::SocketAddr;
@@ -47,7 +45,10 @@ async fn proxy_handler(
 
 fn create_test_config(upstream_url: String) -> Config {
     Config {
-        upstream_url,
+        upstreams: vec![Upstream {
+            name: "default".to_string(),
+            url: upstream_url,
+        }],
         listen_addr: SocketAddr::from(([127, 0, 0, 1], 0)), // Port 0 for auto-assign
         metrics_url: None,
     }

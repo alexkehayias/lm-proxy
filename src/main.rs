@@ -14,11 +14,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config: Config = args.into_config()?;
 
     tracing::info!("Starting lm-proxy...");
-    tracing::info!(
-        "Proxy configured: upstream={} listen={}",
-        config.upstream_url,
-        config.listen_addr
-    );
+    for upstream in &config.upstreams {
+        tracing::info!(
+            "Upstream configured: name={} url={}",
+            upstream.name,
+            upstream.url
+        );
+    }
+    tracing::info!("Listening on {}", config.listen_addr);
 
     server::run(config).await
 }
