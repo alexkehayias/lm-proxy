@@ -84,19 +84,27 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::config::Upstream;
     use axum::{
         body::Body,
         http::{Request, StatusCode},
     };
     use std::net::SocketAddr;
 
-    #[test]
-    fn test_create_router() {
-        let config = Config {
-            upstream_url: "https://api.openai.com/v1".to_string(),
+    fn default_config(upstream_url: String) -> Config {
+        Config {
+            upstreams: vec![Upstream {
+                name: "default".to_string(),
+                url: upstream_url,
+            }],
             listen_addr: SocketAddr::from(([0, 0, 0, 0], 3000)),
             metrics_url: None,
-        };
+        }
+    }
+
+    #[test]
+    fn test_create_router() {
+        let config = default_config("https://api.openai.com/v1".to_string());
         let client = reqwest::Client::new();
         let proxy = ProxyService::new(client, config);
 
@@ -107,7 +115,10 @@ mod tests {
     #[test]
     fn test_create_router_with_metrics_url() {
         let config = Config {
-            upstream_url: "https://api.anthropic.com".to_string(),
+            upstreams: vec![Upstream {
+                name: "default".to_string(),
+                url: "https://api.anthropic.com".to_string(),
+            }],
             listen_addr: SocketAddr::from(([127, 0, 0, 1], 8080)),
             metrics_url: Some("http://localhost:9090/metrics".to_string()),
         };
@@ -120,11 +131,7 @@ mod tests {
 
     #[test]
     fn test_create_router_with_custom_upstream() {
-        let config = Config {
-            upstream_url: "http://localhost:11434/v1".to_string(),
-            listen_addr: SocketAddr::from(([0, 0, 0, 0], 3000)),
-            metrics_url: None,
-        };
+        let config = default_config("http://localhost:11434/v1".to_string());
         let client = reqwest::Client::new();
         let proxy = ProxyService::new(client, config);
 
@@ -144,11 +151,7 @@ mod tests {
             .create_async()
             .await;
 
-        let config = Config {
-            upstream_url: mock_server.url(),
-            listen_addr: SocketAddr::from(([127, 0, 0, 1], 3000)),
-            metrics_url: None,
-        };
+        let config = default_config(mock_server.url());
         let client = reqwest::Client::new();
         let proxy = ProxyService::new(client, config);
 
@@ -178,11 +181,7 @@ mod tests {
             .create_async()
             .await;
 
-        let config = Config {
-            upstream_url: mock_server.url(),
-            listen_addr: SocketAddr::from(([127, 0, 0, 1], 3000)),
-            metrics_url: None,
-        };
+        let config = default_config(mock_server.url());
         let client = reqwest::Client::new();
         let proxy = ProxyService::new(client, config);
 
@@ -211,11 +210,7 @@ mod tests {
             .create_async()
             .await;
 
-        let config = Config {
-            upstream_url: mock_server.url(),
-            listen_addr: SocketAddr::from(([127, 0, 0, 1], 3000)),
-            metrics_url: None,
-        };
+        let config = default_config(mock_server.url());
         let client = reqwest::Client::new();
         let proxy = ProxyService::new(client, config);
 
@@ -243,11 +238,7 @@ mod tests {
             .create_async()
             .await;
 
-        let config = Config {
-            upstream_url: mock_server.url(),
-            listen_addr: SocketAddr::from(([127, 0, 0, 1], 3000)),
-            metrics_url: None,
-        };
+        let config = default_config(mock_server.url());
         let client = reqwest::Client::new();
         let proxy = ProxyService::new(client, config);
 
@@ -267,30 +258,18 @@ mod tests {
     #[test]
     fn test_create_router_different_configurations() {
         // Test with IPv4 localhost
-        let config1 = Config {
-            upstream_url: "https://api.openai.com/v1".to_string(),
-            listen_addr: SocketAddr::from(([127, 0, 0, 1], 3000)),
-            metrics_url: None,
-        };
+        let config1 = default_config("https://api.openai.com/v1".to_string());
         let client = reqwest::Client::new();
         let proxy1 = ProxyService::new(client.clone(), config1);
         let _router1 = create_router(proxy1);
 
         // Test with port 8080
-        let config2 = Config {
-            upstream_url: "https://api.openai.com/v1".to_string(),
-            listen_addr: SocketAddr::from(([0, 0, 0, 0], 8080)),
-            metrics_url: None,
-        };
+        let config2 = default_config("https://api.openai.com/v1".to_string());
         let proxy2 = ProxyService::new(client.clone(), config2);
         let _router2 = create_router(proxy2);
 
         // Test with all interfaces and port 9000
-        let config3 = Config {
-            upstream_url: "https://api.openai.com/v1".to_string(),
-            listen_addr: SocketAddr::from(([0, 0, 0, 0], 9000)),
-            metrics_url: None,
-        };
+        let config3 = default_config("https://api.openai.com/v1".to_string());
         let proxy3 = ProxyService::new(client, config3);
         let _router3 = create_router(proxy3);
 
@@ -300,11 +279,7 @@ mod tests {
     #[tokio::test]
     async fn test_proxy_handler_returns_bad_gateway_on_upstream_error() {
         // Use an unreachable upstream to trigger the error path
-        let config = Config {
-            upstream_url: "http://127.0.0.1:1".to_string(), // Nothing running on port 1
-            listen_addr: SocketAddr::from(([127, 0, 0, 1], 3000)),
-            metrics_url: None,
-        };
+        let config = default_config("http://127.0.0.1:1".to_string());
         // Use a client with very short timeout to fail fast
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_millis(100))
@@ -358,11 +333,7 @@ mod tests {
             .create_async()
             .await;
 
-        let config = Config {
-            upstream_url: mock_server.url(),
-            listen_addr: SocketAddr::from(([127, 0, 0, 1], 3000)),
-            metrics_url: None,
-        };
+        let config = default_config(mock_server.url());
         let client = reqwest::Client::new();
         let proxy = ProxyService::new(client, config);
 
@@ -390,11 +361,7 @@ mod tests {
             .create_async()
             .await;
 
-        let config = Config {
-            upstream_url: mock_server.url(),
-            listen_addr: SocketAddr::from(([127, 0, 0, 1], 3000)),
-            metrics_url: None,
-        };
+        let config = default_config(mock_server.url());
         let client = reqwest::Client::new();
         let proxy = ProxyService::new(client, config);
 
@@ -421,11 +388,7 @@ mod tests {
             .create_async()
             .await;
 
-        let config = Config {
-            upstream_url: mock_server.url(),
-            listen_addr: SocketAddr::from(([127, 0, 0, 1], 3000)),
-            metrics_url: None,
-        };
+        let config = default_config(mock_server.url());
         let client = reqwest::Client::new();
         let proxy = ProxyService::new(client, config);
 
@@ -451,11 +414,7 @@ mod tests {
             .create_async()
             .await;
 
-        let config = Config {
-            upstream_url: mock_server.url(),
-            listen_addr: SocketAddr::from(([127, 0, 0, 1], 3000)),
-            metrics_url: None,
-        };
+        let config = default_config(mock_server.url());
         let client = reqwest::Client::new();
         let proxy = ProxyService::new(client, config);
 
