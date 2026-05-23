@@ -24,6 +24,8 @@ RUN apt-get update && \
 
 ARG HOST=0.0.0.0
 ARG PORT=4000
+# Multiple upstreams: space-separated "name=url" pairs
+# Example: --build-arg UPSTREAM="openai=https://api.openai.com/v1 anthropic=https://api.anthropic.com/v1"
 ARG UPSTREAM
 ARG METRICS_URL
 ENV HOST=${HOST} PORT=${PORT} UPSTREAM=${UPSTREAM} METRICS_URL=${METRICS_URL}
