@@ -70,21 +70,21 @@ impl Args {
                 url: "https://api.openai.com/v1".to_string(),
             }]
         } else {
-            self.upstream
-                .into_iter()
-                .map(|entry| {
-                    if let Some(eq_pos) = entry.find('=') {
-                        let name = entry[..eq_pos].to_string();
-                        let url = entry[eq_pos + 1..].to_string();
-                        Upstream { name, url }
-                    } else {
-                        Upstream {
-                            name: "default".to_string(),
-                            url: entry,
-                        }
-                    }
-                })
-                .collect()
+            let mut seen = std::collections::HashSet::new();
+            let mut upstreams: Vec<Upstream> = Vec::new();
+            for entry in self.upstream {
+                let (name, url) = if let Some(eq_pos) = entry.find('=') {
+                    (entry[..eq_pos].to_string(), entry[eq_pos + 1..].to_string())
+                } else {
+                    ("default".to_string(), entry)
+                };
+                if seen.insert(name.clone()) {
+                    upstreams.push(Upstream { name, url });
+                } else if let Some(existing) = upstreams.iter_mut().find(|u| u.name == name) {
+                    existing.url = url;
+                }
+            }
+            upstreams
         };
 
         Ok(Config {
@@ -305,11 +305,11 @@ mod tests {
     }
 
     #[test]
-    fn test_args_multiple_upstreams_mixed_format() {
+    fn test_args_duplicate_upstream_names_last_wins() {
         let args = Args {
             upstream: vec![
                 "default=https://api.openai.com/v1".to_string(),
-                "https://other.example.com/api".to_string(), // no name -> becomes default too (overwrites conceptually, but Vec allows duplicates)
+                "default=https://other.example.com/api".to_string(),
             ],
             host: "0.0.0.0".to_string(),
             port: 3000,
@@ -317,8 +317,26 @@ mod tests {
         };
 
         let config = args.into_config().expect("should create config");
-        assert_eq!(config.upstreams.len(), 2);
+        assert_eq!(config.upstreams.len(), 1);
         assert_eq!(config.upstreams[0].name, "default");
-        assert_eq!(config.upstreams[1].name, "default");
+        assert_eq!(config.upstreams[0].url, "https://other.example.com/api");
+    }
+
+    #[test]
+    fn test_args_multiple_upstreams_mixed_format() {
+        let args = Args {
+            upstream: vec![
+                "default=https://api.openai.com/v1".to_string(),
+                "https://other.example.com/api".to_string(), // no name -> becomes default, last-wins
+            ],
+            host: "0.0.0.0".to_string(),
+            port: 3000,
+            metrics_url: None,
+        };
+
+        let config = args.into_config().expect("should create config");
+        assert_eq!(config.upstreams.len(), 1);
+        assert_eq!(config.upstreams[0].name, "default");
+        assert_eq!(config.upstreams[0].url, "https://other.example.com/api");
     }
 }

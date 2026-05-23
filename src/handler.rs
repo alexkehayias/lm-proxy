@@ -76,33 +76,30 @@ impl ProxyService {
         &'a self,
         path: &str,
     ) -> Result<(&'a Upstream, String), Box<dyn std::error::Error + Send + Sync>> {
-        // Extract the first path segment as a potential upstream name
         let trimmed = path.trim_start_matches('/');
         let first_segment = trimmed.split('/').next().unwrap_or("");
 
-        let (upstream, remaining) = if !first_segment.is_empty()
-            && self.config.find_upstream(first_segment).is_some()
+        if !first_segment.is_empty()
+            && let Some(upstream) = self.config.find_upstream(first_segment)
         {
             // Strip the prefix: "/openai/chat/completions" -> "/chat/completions"
-            let prefix_len = first_segment.len() + 1; // include the trailing /
+            let prefix_len = first_segment.len() + 1;
             let remaining = if trimmed.len() > prefix_len {
                 format!("/{}", &trimmed[prefix_len..])
             } else {
-                String::new()
+                "/".to_string()
             };
-            (self.config.find_upstream(first_segment).unwrap(), remaining)
-        } else if let Some(default) = self.config.default_upstream() {
-            // No matching prefix, use default upstream with the full path
-            (default, path.to_string())
-        } else {
-            return Err(format!(
-                "no upstream found for path '{}' and no default upstream configured",
-                path
-            )
-            .into());
-        };
+            return Ok((upstream, remaining));
+        }
 
-        Ok((upstream, remaining))
+        if let Some(default) = self.config.default_upstream() {
+            Ok((default, path.to_string()))
+        } else {
+            Err(format!(
+                "no upstream found for path '{path}' and no default upstream configured",
+            )
+            .into())
+        }
     }
 
     async fn send_upstream_request(
@@ -516,6 +513,139 @@ mod tests {
         assert!(filtered.contains_key(http::header::CONTENT_TYPE));
         assert!(!filtered.contains_key(http::HeaderName::from_static("connection")));
         assert!(!filtered.contains_key(http::HeaderName::from_static("transfer-encoding")));
+    }
+
+    #[test]
+    fn test_resolve_upstream_to_named_upstream() {
+        let config = Config {
+            upstreams: vec![
+                test_upstream("openai", "https://api.openai.com/v1"),
+                test_upstream("anthropic", "https://api.anthropic.com/v1"),
+            ],
+            listen_addr: SocketAddr::from(([0, 0, 0, 0], 3000)),
+            metrics_url: None,
+        };
+        let client = reqwest::Client::new();
+        let proxy = ProxyService::new(client, config);
+
+        let (upstream, remaining) = proxy
+            .resolve_upstream("/anthropic/v1/messages")
+            .expect("should resolve");
+        assert_eq!(upstream.name, "anthropic");
+        assert_eq!(remaining, "/v1/messages");
+    }
+
+    #[test]
+    fn test_resolve_upstream_to_default_when_path_does_not_match() {
+        let config = Config {
+            upstreams: vec![
+                test_upstream("default", "https://api.openai.com/v1"),
+                test_upstream("anthropic", "https://api.anthropic.com/v1"),
+            ],
+            listen_addr: SocketAddr::from(([0, 0, 0, 0], 3000)),
+            metrics_url: None,
+        };
+        let client = reqwest::Client::new();
+        let proxy = ProxyService::new(client, config);
+
+        let (upstream, remaining) = proxy
+            .resolve_upstream("/v1/chat/completions")
+            .expect("should resolve to default");
+        assert_eq!(upstream.name, "default");
+        assert_eq!(remaining, "/v1/chat/completions");
+    }
+
+    #[test]
+    fn test_resolve_upstream_no_default_returns_error() {
+        let config = Config {
+            upstreams: vec![
+                test_upstream("openai", "https://api.openai.com/v1"),
+                test_upstream("anthropic", "https://api.anthropic.com/v1"),
+            ],
+            listen_addr: SocketAddr::from(([0, 0, 0, 0], 3000)),
+            metrics_url: None,
+        };
+        let client = reqwest::Client::new();
+        let proxy = ProxyService::new(client, config);
+
+        let result = proxy.resolve_upstream("/unknown/foo");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("no upstream found"));
+    }
+
+    #[test]
+    fn test_resolve_upstream_root_of_named_upstream() {
+        let config = Config {
+            upstreams: vec![test_upstream("ollama", "http://localhost:11434")],
+            listen_addr: SocketAddr::from(([0, 0, 0, 0], 3000)),
+            metrics_url: None,
+        };
+        let client = reqwest::Client::new();
+        let proxy = ProxyService::new(client, config);
+
+        let (upstream, remaining) = proxy
+            .resolve_upstream("/ollama")
+            .expect("should resolve");
+        assert_eq!(upstream.name, "ollama");
+        assert_eq!(remaining, "/");
+    }
+
+    #[test]
+    fn test_resolve_upstream_empty_path_uses_default() {
+        let config = Config {
+            upstreams: vec![test_upstream("default", "https://api.openai.com/v1")],
+            listen_addr: SocketAddr::from(([0, 0, 0, 0], 3000)),
+            metrics_url: None,
+        };
+        let client = reqwest::Client::new();
+        let proxy = ProxyService::new(client, config);
+
+        let (upstream, remaining) = proxy
+            .resolve_upstream("")
+            .expect("should resolve");
+        assert_eq!(upstream.name, "default");
+        assert_eq!(remaining, "");
+    }
+
+    #[test]
+    fn test_resolve_upstream_double_slash_paths_resolve_correctly() {
+        let config = Config {
+            upstreams: vec![
+                test_upstream("openai", "https://api.openai.com/v1"),
+                test_upstream("default", "https://api.anthropic.com/v1"),
+            ],
+            listen_addr: SocketAddr::from(([0, 0, 0, 0], 3000)),
+            metrics_url: None,
+        };
+        let client = reqwest::Client::new();
+        let proxy = ProxyService::new(client, config);
+
+        // "//" has no first segment after trimming -> falls to default
+        let (upstream, remaining) = proxy
+            .resolve_upstream("//")
+            .expect("should resolve to default");
+        assert_eq!(upstream.name, "default");
+        assert_eq!(remaining, "//");
+    }
+
+    #[test]
+    fn test_resolve_upstream_single_upstream_is_default() {
+        let config = Config {
+            upstreams: vec![test_upstream("myapi", "http://localhost:8080")],
+            listen_addr: SocketAddr::from(([0, 0, 0, 0], 3000)),
+            metrics_url: None,
+        };
+        let client = reqwest::Client::new();
+        let proxy = ProxyService::new(client, config);
+
+        let (upstream, remaining) = proxy
+            .resolve_upstream("/v1/chat/completions")
+            .expect("should resolve to only upstream");
+        assert_eq!(upstream.name, "myapi");
+        assert_eq!(remaining, "/v1/chat/completions");
     }
 
     #[test]
