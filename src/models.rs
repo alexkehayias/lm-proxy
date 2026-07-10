@@ -348,23 +348,36 @@ pub fn try_parse_usage_from_chunk(chunk: &str) -> Option<Usage> {
 }
 
 /// Attempts to parse usage from a complete JSON body (non-streaming)
+///
+/// Detects the provider by inspecting the raw JSON for provider-specific
+/// field names in the usage object. This is necessary because both OpenAI
+/// and Anthropic responses have an `id` field, so struct-based detection
+/// alone is ambiguous — we need to check for `input_tokens` (Anthropic)
+/// vs `prompt_tokens` (OpenAI) to route to the correct parser.
 pub fn try_parse_usage_from_body(body: &[u8]) -> Option<Usage> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let usage_obj = value.get("usage")?;
+
+    // Detect Anthropic by presence of `input_tokens` in the usage object
+    let is_anthropic = usage_obj
+        .as_object()
+        .map(|obj| obj.contains_key("input_tokens"))
+        .unwrap_or(false);
+
+    if is_anthropic {
+        let response: AnthropicMessageResponse = serde_json::from_value(value).ok()?;
+        return response.usage.map(|u| u.normalize());
+    }
+
     // OpenAI completion
-    if let Ok(response) = serde_json::from_slice::<CompletionResponse>(body)
+    if let Ok(response) = serde_json::from_value::<CompletionResponse>(value.clone())
         && let Some(usage) = response.usage
     {
         return Some(usage.normalize());
     }
 
     // OpenAI embeddings
-    if let Ok(response) = serde_json::from_slice::<EmbeddingsResponse>(body)
-        && let Some(usage) = response.usage
-    {
-        return Some(usage.normalize());
-    }
-
-    // Anthropic messages
-    if let Ok(response) = serde_json::from_slice::<AnthropicMessageResponse>(body)
+    if let Ok(response) = serde_json::from_value::<EmbeddingsResponse>(value)
         && let Some(usage) = response.usage
     {
         return Some(usage.normalize());
@@ -652,6 +665,43 @@ mod tests {
         let body = br#"{"unknown":"response"}"#;
         let usage = try_parse_usage_from_body(body);
         assert!(usage.is_none());
+    }
+
+    #[test]
+    fn test_try_parse_usage_from_body_anthropic_with_thinking() {
+        // Anthropic non-streaming response with thinking tokens.
+        // This is the critical test: before the format-detection fix, this
+        // response was incorrectly parsed as an OpenAI CompletionResponse
+        // (because both have `id`), which dropped the thinking_tokens field.
+        let body = br#"{"id":"msg_0123","type":"message","role":"assistant","content":[{"type":"text","text":"Hello"}],"model":"claude-opus-4-7","stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":10,"cache_creation_input_tokens":5,"output_tokens_details":{"thinking_tokens":30}}}"#;
+        let usage = try_parse_usage_from_body(body);
+        assert!(usage.is_some(), "Should parse Anthropic response with thinking tokens");
+        let usage = usage.unwrap();
+        assert_eq!(usage.input, 100);
+        assert_eq!(usage.output, 50);
+        assert_eq!(usage.cache_read, 10);
+        assert_eq!(usage.cache_write, 5);
+        assert_eq!(
+            usage.reasoning,
+            Some(30),
+            "thinking_tokens should be captured in reasoning field, not None"
+        );
+    }
+
+    #[test]
+    fn test_try_parse_usage_from_body_anthropic_no_thinking() {
+        // Anthropic response without thinking enabled — output_tokens_details absent
+        let body = br#"{"id":"msg_0123","type":"message","role":"assistant","content":[{"type":"text","text":"Hello"}],"model":"claude-opus-4-7","stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":50}}"#;
+        let usage = try_parse_usage_from_body(body);
+        assert!(usage.is_some());
+        let usage = usage.unwrap();
+        assert_eq!(usage.input, 100);
+        assert_eq!(usage.output, 50);
+        assert_eq!(
+            usage.reasoning,
+            None,
+            "reasoning should be None when thinking is not enabled"
+        );
     }
 
     #[test]
