@@ -7,7 +7,7 @@ A Rust-based HTTP proxy server that forwards requests to upstream APIs (such as 
 ## Features
 
 - **Request Proxying**: Forwards any HTTP request (GET, POST, PUT, DELETE, etc.) to an upstream API
-- **Usage Tracking**: Automatically monitors and logs usage statistics (prompt tokens, completion tokens, total tokens) from:
+- **Usage Tracking**: Automatically monitors and logs normalized usage statistics (input, output, cache read, cache write) from:
   - OpenAI chat completion endpoints
   - OpenAI completion endpoints
   - OpenAI embedding endpoints
@@ -152,24 +152,51 @@ curl -X POST http://localhost:3000/anthropic/v1/messages \
 
 ### Usage Tracking
 
-Usage statistics are automatically logged for tracked endpoints. When processing responses from completion or embedding endpoints, the proxy parses and logs:
+Usage statistics are automatically logged for tracked endpoints (completions, embeddings, Anthropic messages). The proxy normalizes both OpenAI and Anthropic usage into a common four-bucket shape:
+
+| Bucket       | OpenAI source                                              | Anthropic source                       |
+|--------------|------------------------------------------------------------|----------------------------------------|
+| `input`      | `prompt_tokens - cached_tokens` (fresh, non-cached input) | `input_tokens`                         |
+| `output`     | `completion_tokens` (includes reasoning tokens)            | `output_tokens`                        |
+| `cache_read`  | `prompt_tokens_details.cached_tokens`                      | `cache_read_input_tokens`              |
+| `cache_write` | always 0 (OpenAI auto-caches; writes aren't billed)       | `cache_creation_input_tokens`          |
+| `reasoning`   | `completion_tokens_details.reasoning_tokens` (optional)    | `output_tokens_details.thinking_tokens` (optional) |
+
+Each bucket is billed at a different rate, so preserving all four lets downstream cost estimators apply provider-specific pricing. The log format is:
 
 ```
-[USAGE] prompt_tokens=10 completion_tokens=20 total_tokens=30
+[USAGE] input=10 output=42 cache_read=5 cache_write=0 reasoning=None
 ```
 
 #### Metrics Posting
 
-When `--metrics-url` is configured, the proxy will POST token counts to the specified endpoint after each request. The payload format is:
+When `--metrics-url` is configured, the proxy POSTs a JSON payload to the specified endpoint after each request. The payload carries all four buckets (plus optional `reasoning`):
 
 ```json
 {
-  "name": "token-count",
-  "value": 30
+  "input": 10,
+  "output": 42,
+  "cache_read": 5,
+  "cache_write": 0,
+  "reasoning": null
 }
 ```
 
-This enables integration with external metrics aggregation systems. Metrics are posted asynchronously (fire-and-forget) to avoid impacting request latency.
+Metrics are posted asynchronously (fire-and-forget) to avoid impacting request latency.
+
+#### Streaming Caveat: Per-Chunk Double-Counting
+
+For **streaming** responses, the proxy parses usage from each SSE chunk independently and fires a metrics POST for every chunk that contains a `usage` field. This is simple but introduces two caveats specific to Anthropic streams:
+
+1. **Two events per request.** Anthropic emits usage on `message_start` (carrying `input_tokens`) and again on the final `message_delta` (carrying cumulative `output_tokens`). Downstream sees ~2 metrics events per Anthropic stream, not 1.
+
+2. **Small overcount on `output`.** The final `message_delta`'s `output_tokens` is *cumulative* for the whole response (it already includes the placeholder `1` from `message_start`). Summing both events' `output` overcounts by ~1 token (bounded, sub-percent error on typical responses).
+
+OpenAI streams do not have this issue — usage is emitted only on the final chunk.
+
+Non-streaming responses are unaffected: a single metrics event is posted per request with the complete `Usage`.
+
+If accurate per-request accounting matters more to you than simplicity, a future change could accumulate across chunks and post one event when the stream ends. For now, downstream consumers should treat Anthropic streaming events as **additive across `input`** (only one event carries input) but **non-additive across `output`** (the final `message_delta` is authoritative; earlier values are placeholders).
 
 ## Development
 
@@ -252,7 +279,7 @@ When serving requests with usage tracking:
 [INFO] Upstream configured: name=openai url=https://api.openai.com/v1
 [INFO] Upstream configured: name=anthropic url=https://api.anthropic.com/v1
 [INFO] Listening on 0.0.0.0:3000
-[USAGE] prompt_tokens=15 completion_tokens=42 total_tokens=57
+[USAGE] input=10 output=42 cache_read=5 cache_write=0 reasoning=None
 ```
 
 ## License

@@ -6,11 +6,31 @@ use axum::{
 };
 use futures_util::StreamExt;
 
-/// Payload for posting metrics to external endpoint
+/// Payload for posting metrics to external endpoint.
+///
+/// Carries the four normalized token buckets so downstream cost estimators
+/// can apply provider-specific rates (cache reads are cheaper than fresh input
+/// on Anthropic; cache writes are billed at a premium, etc.).
 #[derive(serde::Serialize)]
 struct MetricsPayload {
-    name: String,
-    value: u32,
+    input: u32,
+    output: u32,
+    cache_read: u32,
+    cache_write: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<u32>,
+}
+
+impl MetricsPayload {
+    fn from_usage(usage: &models::Usage) -> Self {
+        Self {
+            input: usage.input,
+            output: usage.output,
+            cache_read: usage.cache_read,
+            cache_write: usage.cache_write,
+            reasoning: usage.reasoning,
+        }
+    }
 }
 
 /// Proxy service that forwards requests to upstream API
@@ -134,8 +154,8 @@ impl ProxyService {
 
         if let Some(usage) = models::try_parse_usage_from_body(&body_bytes) {
             tracing::info!("[USAGE] {}", usage.log_format());
-            if let Some(total_tokens) = usage.total() {
-                self.post_metrics_if_configured(total_tokens);
+            if usage.total() > 0 {
+                self.post_metrics_if_configured(usage);
             }
         }
 
@@ -157,8 +177,8 @@ impl ProxyService {
                 && let Some(usage) = parse_usage_from_sse_chunk(chunk)
             {
                 tracing::info!("[USAGE] {}", usage.log_format());
-                if let Some(total_tokens) = usage.total() {
-                    post_metrics_async(client.clone(), metrics_url.clone(), total_tokens);
+                if usage.total() > 0 {
+                    post_metrics_async(client.clone(), metrics_url.clone(), usage);
                 }
             }
 
@@ -177,9 +197,9 @@ impl ProxyService {
         Ok(builder.body(Body::from_stream(stream)).unwrap())
     }
 
-    fn post_metrics_if_configured(&self, total_tokens: u32) {
+    fn post_metrics_if_configured(&self, usage: models::Usage) {
         if let Some(url) = self.config.metrics_url.clone() {
-            post_metrics_async(self.client.clone(), Some(url), total_tokens);
+            post_metrics_async(self.client.clone(), Some(url), usage);
         }
     }
 }
@@ -214,13 +234,10 @@ fn parse_usage_from_sse_chunk(chunk: &[u8]) -> Option<models::Usage> {
 }
 
 /// Post metrics asynchronously (spawned task, fire-and-forget)
-fn post_metrics_async(client: reqwest::Client, url: Option<String>, total_tokens: u32) {
+fn post_metrics_async(client: reqwest::Client, url: Option<String>, usage: models::Usage) {
     if let Some(url) = url {
         tokio::spawn(async move {
-            let payload = MetricsPayload {
-                name: "token-count".to_string(),
-                value: total_tokens,
-            };
+            let payload = MetricsPayload::from_usage(&usage);
 
             if let Err(e) = client
                 .post(url)
@@ -465,7 +482,14 @@ mod tests {
     async fn test_post_metrics_async_no_url() {
         let client = reqwest::Client::new();
         // Should not panic when URL is None
-        post_metrics_async(client, None, 100);
+        post_metrics_async(
+            client,
+            None,
+            models::Usage {
+                input: 100,
+                ..Default::default()
+            },
+        );
     }
 
     #[tokio::test]
@@ -473,7 +497,14 @@ mod tests {
         let client = reqwest::Client::new();
         // Should not panic even if the endpoint doesn't exist
         // The error is logged but not propagated
-        post_metrics_async(client, Some("http://localhost:1/notfound".to_string()), 100);
+        post_metrics_async(
+            client,
+            Some("http://localhost:1/notfound".to_string()),
+            models::Usage {
+                input: 100,
+                ..Default::default()
+            },
+        );
         // Give it a moment to try
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     }
@@ -666,7 +697,10 @@ mod tests {
         let chunk = b"data: {\"id\":\"chatcmpl-123\",\"object\":\"chat.completion.chunk\",\"created\":1677652288,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}";
         let usage = parse_usage_from_sse_chunk(chunk);
         assert!(usage.is_some());
-        assert_eq!(usage.unwrap().prompt_tokens, Some(10));
+        // prompt_tokens=10, no cached_tokens -> input=10
+        let usage = usage.unwrap();
+        assert_eq!(usage.input, 10);
+        assert_eq!(usage.output, 5);
     }
 
     #[test]
@@ -696,7 +730,8 @@ mod tests {
         let chunk = b"event: message_start\ndata: {\"type\": \"message_start\", \"message\": {\"id\": \"msg_1nZdL29xx5MUA1yADyHTEsnR8uuvGzszyY\", \"type\": \"message\", \"role\": \"assistant\", \"content\": [], \"model\": \"claude-opus-4-6\", \"stop_reason\": null, \"stop_sequence\": null, \"usage\": {\"input_tokens\": 25, \"output_tokens\": 1}}}";
         let usage = parse_usage_from_sse_chunk(chunk);
         assert!(usage.is_some());
-        assert_eq!(usage.unwrap().prompt_tokens, Some(25));
+        // Anthropic input_tokens is fresh, so it maps directly to canonical input
+        assert_eq!(usage.unwrap().input, 25);
     }
 
     #[test]
@@ -705,6 +740,6 @@ mod tests {
         let chunk = b"event: message_delta\ndata: {\"type\": \"message_delta\", \"delta\": {\"stop_reason\": \"end_turn\", \"stop_sequence\": null}, \"usage\": {\"output_tokens\": 15}}";
         let usage = parse_usage_from_sse_chunk(chunk);
         assert!(usage.is_some());
-        assert_eq!(usage.unwrap().completion_tokens, Some(15));
+        assert_eq!(usage.unwrap().output, 15);
     }
 }
