@@ -171,14 +171,23 @@ impl ProxyService {
         let client = self.client.clone();
         let metrics_url = self.config.metrics_url.clone();
 
+        // The accumulator lives in the closure so it persists across chunks.
+        // Bytes are still forwarded to the client immediately (passthrough —
+        // `result` is returned unchanged); the buffer only feeds a side path
+        // that reassembles SSE events split across HTTP/2 DATA frames.
+        let mut buffer = SseEventBuffer::new();
+
         let upstream_stream = Box::pin(upstream_response.bytes_stream().map(move |result| {
             if tracking_usage
                 && let Ok(chunk) = &result
-                && let Some(usage) = parse_usage_from_sse_chunk(chunk)
             {
-                tracing::info!("[USAGE] {}", usage.log_format());
-                if usage.total() > 0 {
-                    post_metrics_async(client.clone(), metrics_url.clone(), usage);
+                for event in buffer.feed(chunk) {
+                    if let Some(usage) = models::try_parse_usage_from_chunk(&event) {
+                        tracing::info!("[USAGE] {}", usage.log_format());
+                        if usage.total() > 0 {
+                            post_metrics_async(client.clone(), metrics_url.clone(), usage);
+                        }
+                    }
                 }
             }
 
@@ -225,12 +234,64 @@ fn is_hop_by_hop_header(name: &HeaderName) -> bool {
     )
 }
 
-/// Parse usage from an SSE chunk
-fn parse_usage_from_sse_chunk(chunk: &[u8]) -> Option<models::Usage> {
-    let text = std::str::from_utf8(chunk).ok()?;
+/// Buffers bytes from an SSE stream and yields complete events.
+///
+/// SSE events are terminated by a blank line (`\n\n`). When an upstream
+/// HTTP/2 DATA frame splits an event across multiple chunks, this buffer
+/// reassembles the pieces so usage parsing sees a complete `event: ...\ndata: ...` block
+/// — otherwise `message_delta` events carrying Anthropic's `thinking_tokens` get
+/// dropped because neither half of a split contains valid JSON.
+pub(crate) struct SseEventBuffer {
+    pending: Vec<u8>,
+}
 
-    // Use the more robust parsing from models that handles both OpenAI and Anthropic SSE formats
-    models::try_parse_usage_from_chunk(text)
+impl SseEventBuffer {
+    pub(crate) fn new() -> Self {
+        Self { pending: Vec::new() }
+    }
+
+    /// Feed a chunk of bytes. Returns complete SSE events (with the trailing
+    /// `\n\n` delimiter stripped) that were formed by this chunk.
+    ///
+    /// Events are delimited by `\n\n`. CRLF (`\r\n`) line endings — both within
+    /// an event and as the `\r\n\r\n` terminator — are normalized to LF on ingest
+    /// by stripping raw `\r`. This is safe for SSE: JSON payloads escape `\r`
+    /// as the two-byte sequence `\\r`, so raw `\r` only ever appears as part of
+    /// a CRLF line ending. A split event (arriving across multiple chunks) is only
+    /// yielded once its closing `\n\n` arrives.
+    pub(crate) fn feed(&mut self, chunk: &[u8]) -> Vec<String> {
+        // Fast path: most SSE streams use LF only, so skip the allocation when
+        // the chunk has no \r bytes (the common case for Anthropic/OpenAI).
+        if chunk.contains(&b'\r') {
+            let normalized: Vec<u8> = chunk
+                .iter()
+                .copied()
+                .filter(|&b| b != b'\r')
+                .collect();
+            self.pending.extend(&normalized);
+        } else {
+            self.pending.extend_from_slice(chunk);
+        }
+
+        let mut events = Vec::new();
+        while let Some(pos) = self.pending.windows(2).position(|w| w == b"\n\n") {
+            // Consume everything up to and including the `\n\n` delimiter
+            let event_bytes: Vec<u8> = self.pending.drain(..pos + 2).collect();
+            if let Ok(s) = std::str::from_utf8(&event_bytes[..pos]) {
+                let trimmed = s.trim();
+                if !trimmed.is_empty() {
+                    events.push(trimmed.to_string());
+                }
+            }
+        }
+        events
+    }
+}
+
+impl Default for SseEventBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Post metrics asynchronously (spawned task, fire-and-forget)
@@ -692,54 +753,147 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_usage_from_sse_chunk_valid() {
-        // Use a valid OpenAI-style chunk with usage
-        let chunk = b"data: {\"id\":\"chatcmpl-123\",\"object\":\"chat.completion.chunk\",\"created\":1677652288,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}";
-        let usage = parse_usage_from_sse_chunk(chunk);
-        assert!(usage.is_some());
-        // prompt_tokens=10, no cached_tokens -> input=10
-        let usage = usage.unwrap();
-        assert_eq!(usage.input, 10);
-        assert_eq!(usage.output, 5);
-    }
-
-    #[test]
-    fn test_parse_usage_from_sse_chunk_done() {
-        let chunk = b"data: [DONE]";
-        let usage = parse_usage_from_sse_chunk(chunk);
-        assert!(usage.is_none());
-    }
-
-    #[test]
-    fn test_parse_usage_from_sse_chunk_invalid_utf8() {
-        let chunk = &[0xff, 0xfe]; // Invalid UTF-8
-        let usage = parse_usage_from_sse_chunk(chunk);
-        assert!(usage.is_none());
-    }
-
-    #[test]
-    fn test_parse_usage_from_sse_chunk_no_data_prefix() {
-        let chunk = b"{\"usage\":{}}";
-        let usage = parse_usage_from_sse_chunk(chunk);
-        assert!(usage.is_none());
-    }
-
-    #[test]
-    fn test_parse_usage_from_sse_chunk_anthropic_message_start() {
-        // Anthropic streaming message_start event with event: prefix
-        let chunk = b"event: message_start\ndata: {\"type\": \"message_start\", \"message\": {\"id\": \"msg_1nZdL29xx5MUA1yADyHTEsnR8uuvGzszyY\", \"type\": \"message\", \"role\": \"assistant\", \"content\": [], \"model\": \"claude-opus-4-6\", \"stop_reason\": null, \"stop_sequence\": null, \"usage\": {\"input_tokens\": 25, \"output_tokens\": 1}}}";
-        let usage = parse_usage_from_sse_chunk(chunk);
-        assert!(usage.is_some());
-        // Anthropic input_tokens is fresh, so it maps directly to canonical input
+    fn test_sse_buffer_single_complete_event() {
+        // A complete event in one chunk (no splitting) — baseline behavior.
+        let mut buf = SseEventBuffer::new();
+        let chunk = b"event: message_start\ndata: {\"type\": \"message_start\", \"message\": {\"id\": \"msg_1\", \"usage\": {\"input_tokens\": 25, \"output_tokens\": 1}}}\n\n";
+        let events = buf.feed(chunk);
+        assert_eq!(events.len(), 1);
+        let usage = models::try_parse_usage_from_chunk(&events[0]);
+        assert!(usage.is_some(), "should parse usage from reassembled event");
         assert_eq!(usage.unwrap().input, 25);
     }
 
     #[test]
-    fn test_parse_usage_from_sse_chunk_anthropic_message_delta() {
-        // Anthropic streaming message_delta event
-        let chunk = b"event: message_delta\ndata: {\"type\": \"message_delta\", \"delta\": {\"stop_reason\": \"end_turn\", \"stop_sequence\": null}, \"usage\": {\"output_tokens\": 15}}";
-        let usage = parse_usage_from_sse_chunk(chunk);
-        assert!(usage.is_some());
-        assert_eq!(usage.unwrap().output, 15);
+    fn test_sse_buffer_split_message_delta_thinking_captured() {
+        // Bug scenario: a message_delta event carrying thinking_tokens is split
+        // across two HTTP/2 DATA frames. Without reassembly, neither half contains
+        // valid JSON and thinking_tokens would be silently dropped.
+        let mut buf = SseEventBuffer::new();
+        let part1 = b"event: message_delta\ndata: {\"type\": \"message";
+        let part2 = b"_delta\", \"delta\": {\"stop_reason\": \"end_turn\"}, \"usage\": {\"output_tokens\": 100, \"output_tokens_details\": {\"thinking_tokens\": 30}}}\n\n";
+
+        // First chunk: partial event, nothing complete yet
+        let events = buf.feed(part1);
+        assert!(events.is_empty(), "partial event should not be yielded yet");
+
+        // Second chunk: completes the event
+        let events = buf.feed(part2);
+        assert_eq!(events.len(), 1, "reassembled event should be yielded");
+        let usage = models::try_parse_usage_from_chunk(&events[0])
+            .expect("thinking_tokens must be captured from reassembled event");
+        assert_eq!(usage.output, 100);
+        assert_eq!(
+            usage.reasoning,
+            Some(30),
+            "thinking_tokens (reasoning) must survive chunk boundary splitting",
+        );
+    }
+
+    #[test]
+    fn test_sse_buffer_split_message_start_event() {
+        // message_start event split across three chunks (the event: line, then
+        // half the data: JSON, then the rest). Verifies accumulation across >2 chunks.
+        let mut buf = SseEventBuffer::new();
+        let part1 = b"event: message_start\nda";
+        let part2 = b"ta: {\"type\": \"message_st";
+        let part3 = b"art\", \"message\": {\"id\": \"msg_1\", \"usage\": {\"input_tokens\": 200, \"output_tokens\": 1}}}\n\n";
+
+        assert!(buf.feed(part1).is_empty());
+        assert!(buf.feed(part2).is_empty());
+        let events = buf.feed(part3);
+        assert_eq!(events.len(), 1);
+
+        let usage = models::try_parse_usage_from_chunk(&events[0])
+            .expect("should parse reassembled message_start");
+        assert_eq!(usage.input, 200);
+        assert_eq!(usage.output, 1);
+    }
+
+    #[test]
+    fn test_sse_buffer_multi_event_stream_spanning_chunks() {
+        // A realistic Anthropic stream: message_start, several content blocks,
+        // and a final message_delta — all arriving in arbitrary chunk boundaries
+        // that don't align with event boundaries.
+        let mut buf = SseEventBuffer::new();
+
+        // Chunk 1: message_start (complete) + start of content_block_start
+        let chunk1 = b"event: message_start\ndata: {\"type\": \"message_start\", \"message\": {\"id\": \"msg_1\", \"usage\": {\"input_tokens\": 100, \"output_tokens\": 1}}}\n\neve";
+        let chunk2 = b"nt: content_block_start\ndata: {\"type\": \"content_block_start\", \"index\": 0, \"content_block\": {\"type\": \"text\", \"text\": \"\"}}\n\n";
+        // Chunk 3: a ping (no usage) + message_delta with thinking_tokens
+        let chunk3 = b"event: ping\ndata: {\"type\": \"ping\"}\n\nevent: message_delta\ndata: {\"type\": \"message_delta\", \"delta\": {\"stop_reason\": \"end_turn\"}, \"usage\": {\"output_tokens\": 50, \"output_tokens_details\": {\"thinking_tokens\": 20}}}\n\n";
+
+        let mut all_usage = Vec::new();
+        for chunk in [chunk1.as_slice(), chunk2.as_slice(), chunk3.as_slice()] {
+            for event in buf.feed(chunk) {
+                if let Some(usage) = models::try_parse_usage_from_chunk(&event) {
+                    all_usage.push(usage);
+                }
+            }
+        }
+
+        // message_start (input=100) and message_delta (output=50, thinking=20)
+        // ping events have no usage and should be skipped
+        assert_eq!(all_usage.len(), 2, "should extract usage from both events");
+        assert_eq!(all_usage[0].input, 100);
+        assert_eq!(all_usage[0].output, 1);
+        assert_eq!(all_usage[1].output, 50);
+        assert_eq!(
+            all_usage[1].reasoning,
+            Some(20),
+            "thinking_tokens from final message_delta must be captured",
+        );
+    }
+
+    #[test]
+    fn test_sse_buffer_partial_chunk_holds_incomplete_data() {
+        // A chunk with no \n\n delimiter yet — buffer should hold it without
+        // yielding, then yield once the closing \n\n arrives.
+        let mut buf = SseEventBuffer::new();
+        assert!(buf.feed(b"event: ping\ndata: {\"type\": \"ping\"}").is_empty());
+        // Arrives in a later chunk
+        let events = buf.feed(b"\n\nevent: done\ndata: [DONE]\n\n");
+        assert_eq!(events.len(), 2, "both complete events should be yielded");
+        // ping has no usage -> None; [DONE] -> None
+        assert!(models::try_parse_usage_from_chunk(&events[0]).is_none());
+        assert!(models::try_parse_usage_from_chunk(&events[1]).is_none());
+    }
+
+    #[test]
+    fn test_sse_buffer_invalid_utf8_event_skipped() {
+        // If an event body contains invalid UTF-8, it's skipped (drained from
+        // the buffer) without panicking — matches the old per-chunk behavior.
+        let mut buf = SseEventBuffer::new();
+        // Invalid UTF-8 event followed by a valid OpenAI-style chunk
+        let chunk = b"event: bad\ndata: \xff\xfe\n\nevent: good\ndata: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1677652288,\"model\":\"gpt-4\",\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}\n\n";
+        let events = buf.feed(chunk);
+        // The invalid event is dropped; only the valid one comes through
+        assert_eq!(events.len(), 1, "invalid UTF-8 event should be skipped");
+        let usage = models::try_parse_usage_from_chunk(&events[0]);
+        assert!(usage.is_some(), "valid event after the bad one should still parse");
+        assert_eq!(usage.unwrap().input, 5);
+    }
+
+    #[test]
+    fn test_sse_buffer_trims_crlf_line_endings() {
+        // Some upstreams send CRLF (\r\n) line endings. The buffer should trim
+        // trailing \r so try_parse_usage_from_chunk sees a clean event.
+        let mut buf = SseEventBuffer::new();
+        // SSE with CRLF: "event: ...\r\ndata: {...}\r\n\r\n"
+        let chunk = b"event: message_delta\ndata: {\"type\": \"message_delta\", \"usage\": {\"output_tokens\": 7}}\r\n\r\n";
+        let events = buf.feed(chunk);
+        assert_eq!(events.len(), 1);
+        // The trimmed event should not contain a trailing \r that would break
+        // try_parse_usage_from_chunk's "\ndata: " search
+        let usage = models::try_parse_usage_from_chunk(&events[0]);
+        assert!(usage.is_some(), "CRLF event should parse after trimming");
+        assert_eq!(usage.unwrap().output, 7);
+    }
+
+    #[test]
+    fn test_sse_buffer_default_impl() {
+        // Default trait impl should match new()
+        let buf = SseEventBuffer::default();
+        assert!(buf.pending.is_empty());
     }
 }
