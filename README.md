@@ -1,8 +1,6 @@
 # lm-proxy
 
-AI GENERATED, DO NOT USE
-
-A Rust-based HTTP proxy server that forwards requests to upstream APIs (such as OpenAI's API) while optionally tracking usage statistics from completion and embedding responses. The proxy sits between clients and API endpoints to provide request forwarding with usage monitoring capabilities.
+An HTTP proxy server that sits between clients and OpenAI and Anthropic API conforming endpoints to provide request forwarding with usage monitoring capabilities.
 
 ## Features
 
@@ -62,18 +60,6 @@ POST /anthropic/v1/messages       →  https://api.anthropic.com/v1/messages
 ```
 
 If no upstream name prefix matches, the proxy falls back to an upstream named `"default"`, or the single configured upstream if there is exactly one.
-
-#### Backward Compatibility
-
-Single `--upstream` usage works exactly as before:
-
-```bash
-# Single unnamed upstream → name is "default"
-cargo run -- --upstream https://api.openai.com/v1
-
-# No --upstream → defaults to --upstream default=https://api.openai.com/v1
-cargo run
-```
 
 ## Running behind Nginx
 
@@ -216,22 +202,6 @@ cargo test --test e2e_test
 cargo test -- --nocapture
 ```
 
-### Project Structure
-
-```
-lm-proxy/
-├── src/
-│   ├── main.rs      # Entry point and server setup
-│   ├── handler.rs   # ProxyService implementation
-│   ├── models.rs    # Data structures for API responses and usage tracking
-│   ├── config.rs    # Configuration management
-│   └── lib.rs       # Library exports (for integration tests)
-├── tests/
-│   └── e2e_test.rs  # End-to-end integration tests
-├── Cargo.toml       # Project dependencies and metadata
-└── README.md        # This file
-```
-
 ### Code Quality
 
 ```bash
@@ -281,11 +251,3 @@ When serving requests with usage tracking:
 [INFO] Listening on 0.0.0.0:3000
 [USAGE] input=10 output=42 cache_read=5 cache_write=0 reasoning=None
 ```
-
-## License
-
-This project is provided as-is for educational and development purposes.
-
----
-
-For questions or issues, please refer to the project repository.
