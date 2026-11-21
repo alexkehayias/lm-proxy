@@ -15,11 +15,21 @@ impl Upstream {
     }
 }
 
+/// Where and how to post usage metrics.
+///
+/// Requests are signed with HMAC-SHA256 over `<timestamp>.<body>`, so the URL
+/// and secret always travel together.
+#[derive(Debug, Clone)]
+pub struct MetricsConfig {
+    pub url: String,
+    pub secret: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub upstreams: Vec<Upstream>,
     pub listen_addr: SocketAddr,
-    pub metrics_url: Option<String>,
+    pub metrics: Option<MetricsConfig>,
 }
 
 impl Config {
@@ -53,9 +63,14 @@ pub struct Args {
     #[arg(short, long, default_value_t = 3000)]
     pub port: u16,
 
-    /// URL to post usage metrics (e.g., http://localhost:8080/metrics)
+    /// URL to post usage metrics to
     #[arg(long)]
     pub metrics_url: Option<String>,
+
+    /// Shared secret used to sign metrics posts (the secret configured on the
+    /// receiving proxy). Required when --metrics-url is set.
+    #[arg(long)]
+    pub metrics_secret: Option<String>,
 }
 
 impl Args {
@@ -87,10 +102,17 @@ impl Args {
             upstreams
         };
 
+        let metrics = match (self.metrics_url, self.metrics_secret) {
+            (None, None) => None,
+            (Some(url), Some(secret)) => Some(MetricsConfig { url, secret }),
+            (Some(_), None) => return Err("--metrics-url requires --metrics-secret".into()),
+            (None, Some(_)) => return Err("--metrics-secret requires --metrics-url".into()),
+        };
+
         Ok(Config {
             upstreams,
             listen_addr,
-            metrics_url: self.metrics_url,
+            metrics,
         })
     }
 }
@@ -103,6 +125,28 @@ mod tests {
         Upstream {
             name: name.to_string(),
             url: url.to_string(),
+        }
+    }
+
+    fn test_config(upstreams: Vec<Upstream>, metrics: Option<MetricsConfig>) -> Config {
+        Config {
+            upstreams,
+            listen_addr: SocketAddr::from(([0, 0, 0, 0], 3000)),
+            metrics,
+        }
+    }
+
+    fn test_args(
+        upstream: Vec<&str>,
+        metrics_url: Option<&str>,
+        metrics_secret: Option<&str>,
+    ) -> Args {
+        Args {
+            upstream: upstream.into_iter().map(str::to_string).collect(),
+            host: "0.0.0.0".to_string(),
+            port: 3000,
+            metrics_url: metrics_url.map(str::to_string),
+            metrics_secret: metrics_secret.map(str::to_string),
         }
     }
 
@@ -135,14 +179,13 @@ mod tests {
 
     #[test]
     fn test_find_upstream() {
-        let config = Config {
-            upstreams: vec![
+        let config = test_config(
+            vec![
                 test_upstream("openai", "https://api.openai.com/v1"),
                 test_upstream("anthropic", "https://api.anthropic.com/v1"),
             ],
-            listen_addr: SocketAddr::from(([0, 0, 0, 0], 3000)),
-            metrics_url: None,
-        };
+            None,
+        );
 
         assert_eq!(config.find_upstream("openai").unwrap().url, "https://api.openai.com/v1");
         assert_eq!(config.find_upstream("anthropic").unwrap().url, "https://api.anthropic.com/v1");
@@ -151,52 +194,51 @@ mod tests {
 
     #[test]
     fn test_default_upstream_named_default() {
-        let config = Config {
-            upstreams: vec![
+        let config = test_config(
+            vec![
                 test_upstream("default", "https://api.openai.com/v1"),
                 test_upstream("other", "https://other.example.com"),
             ],
-            listen_addr: SocketAddr::from(([0, 0, 0, 0], 3000)),
-            metrics_url: None,
-        };
+            None,
+        );
 
         assert_eq!(config.default_upstream().unwrap().url, "https://api.openai.com/v1");
     }
 
     #[test]
     fn test_default_upstream_single() {
-        let config = Config {
-            upstreams: vec![
-                test_upstream("openai", "https://api.openai.com/v1"),
-            ],
-            listen_addr: SocketAddr::from(([0, 0, 0, 0], 3000)),
-            metrics_url: None,
-        };
+        let config = test_config(
+            vec![test_upstream("openai", "https://api.openai.com/v1")],
+            None,
+        );
 
         assert_eq!(config.default_upstream().unwrap().name, "openai");
     }
 
     #[test]
     fn test_default_upstream_none() {
-        let config = Config {
-            upstreams: vec![
+        let config = test_config(
+            vec![
                 test_upstream("openai", "https://api.openai.com/v1"),
                 test_upstream("anthropic", "https://api.anthropic.com/v1"),
             ],
-            listen_addr: SocketAddr::from(([0, 0, 0, 0], 3000)),
-            metrics_url: None,
-        };
+            None,
+        );
 
         assert!(config.default_upstream().is_none());
     }
 
     #[test]
     fn test_args_with_single_unnamed_upstream() {
+        let args = test_args(
+            vec!["https://api.anthropic.com"],
+            Some("http://localhost:9090/metrics"),
+            Some("test-secret"),
+        );
         let args = Args {
-            upstream: vec!["https://api.anthropic.com".to_string()],
             host: "127.0.0.1".to_string(),
             port: 8080,
-            metrics_url: Some("http://localhost:9090/metrics".to_string()),
+            ..args
         };
 
         let config = args.into_config().expect("should create config");
@@ -204,20 +246,22 @@ mod tests {
         assert_eq!(config.upstreams[0].name, "default");
         assert_eq!(config.upstreams[0].url, "https://api.anthropic.com");
         assert_eq!(config.listen_addr.to_string(), "127.0.0.1:8080");
-        assert_eq!(config.metrics_url, Some("http://localhost:9090/metrics".to_string()));
+
+        let metrics = config.metrics.expect("metrics should be configured");
+        assert_eq!(metrics.url, "http://localhost:9090/metrics");
+        assert_eq!(metrics.secret, "test-secret");
     }
 
     #[test]
     fn test_args_with_named_upstreams() {
-        let args = Args {
-            upstream: vec![
-                "openai=https://api.openai.com/v1".to_string(),
-                "anthropic=https://api.anthropic.com/v1".to_string(),
+        let args = test_args(
+            vec![
+                "openai=https://api.openai.com/v1",
+                "anthropic=https://api.anthropic.com/v1",
             ],
-            host: "0.0.0.0".to_string(),
-            port: 3000,
-            metrics_url: None,
-        };
+            None,
+            None,
+        );
 
         let config = args.into_config().expect("should create config");
         assert_eq!(config.upstreams.len(), 2);
@@ -229,26 +273,20 @@ mod tests {
 
     #[test]
     fn test_args_empty_upstream_defaults() {
-        let args = Args {
-            upstream: vec![],
-            host: "0.0.0.0".to_string(),
-            port: 3000,
-            metrics_url: None,
-        };
+        let args = test_args(vec![], None, None);
 
         let config = args.into_config().expect("should create config");
         assert_eq!(config.upstreams.len(), 1);
         assert_eq!(config.upstreams[0].name, "default");
         assert_eq!(config.upstreams[0].url, "https://api.openai.com/v1");
+        assert!(config.metrics.is_none());
     }
 
     #[test]
     fn test_into_config_invalid_ip() {
         let args = Args {
-            upstream: vec!["https://api.openai.com/v1".to_string()],
             host: "not-an-ip".to_string(),
-            port: 3000,
-            metrics_url: None,
+            ..test_args(vec!["https://api.openai.com/v1"], None, None)
         };
 
         let result = args.into_config();
@@ -258,10 +296,8 @@ mod tests {
     #[test]
     fn test_into_config_port_zero() {
         let args = Args {
-            upstream: vec!["https://api.openai.com/v1".to_string()],
-            host: "0.0.0.0".to_string(),
             port: 0,
-            metrics_url: None,
+            ..test_args(vec!["https://api.openai.com/v1"], None, None)
         };
 
         let result = args.into_config();
@@ -269,35 +305,47 @@ mod tests {
     }
 
     #[test]
-    fn test_config_with_metrics_url() {
-        let config = Config {
-            upstreams: vec![test_upstream("default", "https://api.openai.com/v1")],
-            listen_addr: SocketAddr::from(([127, 0, 0, 1], 3000)),
-            metrics_url: Some("http://localhost:8080/metrics".to_string()),
-        };
-
-        assert!(config.metrics_url.is_some());
-        assert_eq!(config.metrics_url.unwrap(), "http://localhost:8080/metrics");
+    fn test_into_config_requires_metrics_secret_with_url() {
+        let result = test_args(vec![], Some("https://example.com/hook"), None).into_config();
+        assert!(result.is_err());
     }
 
     #[test]
-    fn test_config_without_metrics_url() {
-        let config = Config {
-            upstreams: vec![test_upstream("default", "https://api.openai.com/v1")],
-            listen_addr: SocketAddr::from(([127, 0, 0, 1], 3000)),
-            metrics_url: None,
-        };
+    fn test_into_config_requires_metrics_url_with_secret() {
+        let result = test_args(vec![], None, Some("test-secret")).into_config();
+        assert!(result.is_err());
+    }
 
-        assert!(config.metrics_url.is_none());
+    #[test]
+    fn test_config_with_metrics() {
+        let config = test_config(
+            vec![test_upstream("default", "https://api.openai.com/v1")],
+            Some(MetricsConfig {
+                url: "http://localhost:8080/metrics".to_string(),
+                secret: "test-secret".to_string(),
+            }),
+        );
+
+        let metrics = config.metrics.expect("metrics should be configured");
+        assert_eq!(metrics.url, "http://localhost:8080/metrics");
+    }
+
+    #[test]
+    fn test_config_without_metrics() {
+        let config = test_config(
+            vec![test_upstream("default", "https://api.openai.com/v1")],
+            None,
+        );
+
+        assert!(config.metrics.is_none());
     }
 
     #[test]
     fn test_config_ipv4_loopback() {
         let args = Args {
-            upstream: vec!["https://api.openai.com/v1".to_string()],
             host: "127.0.0.1".to_string(),
             port: 8080,
-            metrics_url: None,
+            ..test_args(vec!["https://api.openai.com/v1"], None, None)
         };
 
         let config = args.into_config().expect("should create config");
@@ -306,15 +354,14 @@ mod tests {
 
     #[test]
     fn test_args_duplicate_upstream_names_last_wins() {
-        let args = Args {
-            upstream: vec![
-                "default=https://api.openai.com/v1".to_string(),
-                "default=https://other.example.com/api".to_string(),
+        let args = test_args(
+            vec![
+                "default=https://api.openai.com/v1",
+                "default=https://other.example.com/api",
             ],
-            host: "0.0.0.0".to_string(),
-            port: 3000,
-            metrics_url: None,
-        };
+            None,
+            None,
+        );
 
         let config = args.into_config().expect("should create config");
         assert_eq!(config.upstreams.len(), 1);
@@ -324,15 +371,14 @@ mod tests {
 
     #[test]
     fn test_args_multiple_upstreams_mixed_format() {
-        let args = Args {
-            upstream: vec![
-                "default=https://api.openai.com/v1".to_string(),
-                "https://other.example.com/api".to_string(), // no name -> becomes default, last-wins
+        let args = test_args(
+            vec![
+                "default=https://api.openai.com/v1",
+                "https://other.example.com/api", // no name -> becomes default, last-wins
             ],
-            host: "0.0.0.0".to_string(),
-            port: 3000,
-            metrics_url: None,
-        };
+            None,
+            None,
+        );
 
         let config = args.into_config().expect("should create config");
         assert_eq!(config.upstreams.len(), 1);

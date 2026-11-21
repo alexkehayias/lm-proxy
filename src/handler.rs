@@ -1,4 +1,4 @@
-use crate::{config::{Config, Upstream}, models};
+use crate::{config::{Config, MetricsConfig, Upstream}, models, signing};
 use axum::{
     body::Body,
     response::Response,
@@ -169,7 +169,7 @@ impl ProxyService {
         tracking_usage: bool,
     ) -> Result<Response, Box<dyn std::error::Error + Send + Sync>> {
         let client = self.client.clone();
-        let metrics_url = self.config.metrics_url.clone();
+        let metrics = self.config.metrics.clone();
 
         // The accumulator lives in the closure so it persists across chunks.
         // Bytes are still forwarded to the client immediately (passthrough —
@@ -185,7 +185,7 @@ impl ProxyService {
                     if let Some(usage) = models::try_parse_usage_from_chunk(&event) {
                         tracing::info!("[USAGE] {}", usage.log_format());
                         if usage.total() > 0 {
-                            post_metrics_async(client.clone(), metrics_url.clone(), usage);
+                            post_metrics_async(client.clone(), metrics.clone(), usage);
                         }
                     }
                 }
@@ -207,9 +207,7 @@ impl ProxyService {
     }
 
     fn post_metrics_if_configured(&self, usage: models::Usage) {
-        if let Some(url) = self.config.metrics_url.clone() {
-            post_metrics_async(self.client.clone(), Some(url), usage);
-        }
+        post_metrics_async(self.client.clone(), self.config.metrics.clone(), usage);
     }
 }
 
@@ -294,23 +292,48 @@ impl Default for SseEventBuffer {
     }
 }
 
-/// Post metrics asynchronously (spawned task, fire-and-forget)
-fn post_metrics_async(client: reqwest::Client, url: Option<String>, usage: models::Usage) {
-    if let Some(url) = url {
-        tokio::spawn(async move {
-            let payload = MetricsPayload::from_usage(&usage);
-
-            if let Err(e) = client
-                .post(url)
-                .json(&payload)
-                .send()
-                .await
-                .map(|r| r.error_for_status())
-            {
-                tracing::warn!("Failed to post metrics: {}", e);
+/// Post metrics asynchronously (spawned task, fire-and-forget).
+///
+/// The body is serialized once so the bytes that are signed are exactly the
+/// bytes sent, and the receiving proxy can verify the request before accepting
+/// it.
+fn post_metrics_async(client: reqwest::Client, metrics: Option<MetricsConfig>, usage: models::Usage) {
+    let Some(metrics) = metrics else {
+        return;
+    };
+    tokio::spawn(async move {
+        let payload = MetricsPayload::from_usage(&usage);
+        let body = match serde_json::to_vec(&payload) {
+            Ok(body) => body,
+            Err(e) => {
+                tracing::warn!("Failed to serialize metrics: {}", e);
+                return;
             }
-        });
-    }
+        };
+        let timestamp = unix_timestamp();
+        let signature = signing::sign(&metrics.secret, timestamp, &body);
+
+        if let Err(e) = client
+            .post(&metrics.url)
+            .header(signing::TIMESTAMP_HEADER, timestamp.to_string())
+            .header(signing::SIGNATURE_HEADER, signature)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await
+            .map(|r| r.error_for_status())
+        {
+            tracing::warn!("Failed to post metrics: {}", e);
+        }
+    });
+}
+
+/// Current Unix time in seconds, used as the signed timestamp.
+fn unix_timestamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock is before the Unix epoch")
+        .as_secs()
 }
 
 #[cfg(test)]
@@ -331,7 +354,7 @@ mod tests {
         Config {
             upstreams: vec![test_upstream("default", &upstream_url)],
             listen_addr: SocketAddr::from(([0, 0, 0, 0], 3000)),
-            metrics_url: None,
+            metrics: None,
         }
     }
 
@@ -532,17 +555,20 @@ mod tests {
         let config = Config {
             upstreams: vec![test_upstream("default", "https://api.openai.com/v1")],
             listen_addr: SocketAddr::from(([0, 0, 0, 0], 3000)),
-            metrics_url: Some("http://localhost:8080/metrics".to_string()),
+            metrics: Some(MetricsConfig {
+                url: "http://localhost:8080/metrics".to_string(),
+                secret: "test-secret".to_string(),
+            }),
         };
 
         let proxy = ProxyService::new(client, config.clone());
-        assert!(proxy.config.metrics_url.is_some());
+        assert!(proxy.config.metrics.is_some());
     }
 
     #[tokio::test]
     async fn test_post_metrics_async_no_url() {
         let client = reqwest::Client::new();
-        // Should not panic when URL is None
+        // Should not panic when metrics are not configured
         post_metrics_async(
             client,
             None,
@@ -560,7 +586,10 @@ mod tests {
         // The error is logged but not propagated
         post_metrics_async(
             client,
-            Some("http://localhost:1/notfound".to_string()),
+            Some(MetricsConfig {
+                url: "http://localhost:1/notfound".to_string(),
+                secret: "test-secret".to_string(),
+            }),
             models::Usage {
                 input: 100,
                 ..Default::default()
@@ -568,6 +597,38 @@ mod tests {
         );
         // Give it a moment to try
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn test_post_metrics_async_signs_request() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/metrics")
+            .match_header(signing::TIMESTAMP_HEADER, mockito::Matcher::Any)
+            .match_header(
+                signing::SIGNATURE_HEADER,
+                mockito::Matcher::Regex(r"^sha256=[0-9a-f]{64}$".to_string()),
+            )
+            .with_status(200)
+            .create_async()
+            .await;
+
+        post_metrics_async(
+            reqwest::Client::new(),
+            Some(MetricsConfig {
+                url: format!("{}/metrics", server.url()),
+                secret: "test-secret".to_string(),
+            }),
+            models::Usage {
+                input: 100,
+                output: 50,
+                ..Default::default()
+            },
+        );
+
+        // The post is spawned fire-and-forget; give it a moment to land.
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        mock.assert_async().await;
     }
 
     #[test]
@@ -615,7 +676,7 @@ mod tests {
                 test_upstream("anthropic", "https://api.anthropic.com/v1"),
             ],
             listen_addr: SocketAddr::from(([0, 0, 0, 0], 3000)),
-            metrics_url: None,
+            metrics: None,
         };
         let client = reqwest::Client::new();
         let proxy = ProxyService::new(client, config);
@@ -635,7 +696,7 @@ mod tests {
                 test_upstream("anthropic", "https://api.anthropic.com/v1"),
             ],
             listen_addr: SocketAddr::from(([0, 0, 0, 0], 3000)),
-            metrics_url: None,
+            metrics: None,
         };
         let client = reqwest::Client::new();
         let proxy = ProxyService::new(client, config);
@@ -655,7 +716,7 @@ mod tests {
                 test_upstream("anthropic", "https://api.anthropic.com/v1"),
             ],
             listen_addr: SocketAddr::from(([0, 0, 0, 0], 3000)),
-            metrics_url: None,
+            metrics: None,
         };
         let client = reqwest::Client::new();
         let proxy = ProxyService::new(client, config);
@@ -673,7 +734,7 @@ mod tests {
         let config = Config {
             upstreams: vec![test_upstream("ollama", "http://localhost:11434")],
             listen_addr: SocketAddr::from(([0, 0, 0, 0], 3000)),
-            metrics_url: None,
+            metrics: None,
         };
         let client = reqwest::Client::new();
         let proxy = ProxyService::new(client, config);
@@ -690,7 +751,7 @@ mod tests {
         let config = Config {
             upstreams: vec![test_upstream("default", "https://api.openai.com/v1")],
             listen_addr: SocketAddr::from(([0, 0, 0, 0], 3000)),
-            metrics_url: None,
+            metrics: None,
         };
         let client = reqwest::Client::new();
         let proxy = ProxyService::new(client, config);
@@ -710,7 +771,7 @@ mod tests {
                 test_upstream("default", "https://api.anthropic.com/v1"),
             ],
             listen_addr: SocketAddr::from(([0, 0, 0, 0], 3000)),
-            metrics_url: None,
+            metrics: None,
         };
         let client = reqwest::Client::new();
         let proxy = ProxyService::new(client, config);
@@ -728,7 +789,7 @@ mod tests {
         let config = Config {
             upstreams: vec![test_upstream("myapi", "http://localhost:8080")],
             listen_addr: SocketAddr::from(([0, 0, 0, 0], 3000)),
-            metrics_url: None,
+            metrics: None,
         };
         let client = reqwest::Client::new();
         let proxy = ProxyService::new(client, config);

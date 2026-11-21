@@ -50,7 +50,7 @@ fn create_test_config(upstream_url: String) -> Config {
             url: upstream_url,
         }],
         listen_addr: SocketAddr::from(([127, 0, 0, 1], 0)), // Port 0 for auto-assign
-        metrics_url: None,
+        metrics: None,
     }
 }
 

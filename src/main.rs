@@ -2,6 +2,7 @@ mod config;
 mod handler;
 mod models;
 mod server;
+mod signing;
 
 use clap::Parser;
 use config::{Args, Config};

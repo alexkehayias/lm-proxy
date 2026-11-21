@@ -14,9 +14,11 @@ if [ -n "$UPSTREAM" ]; then
     done
 fi
 
-# Optional metrics URL
+# Optional metrics posting. Posts are signed with HMAC-SHA256, so the shared
+# secret must accompany the URL.
 if [ -n "${METRICS_URL:-}" ]; then
-    set -- "$@" --metrics-url "$METRICS_URL"
+    : "${METRICS_SECRET:?METRICS_SECRET not set}"
+    set -- "$@" --metrics-url "$METRICS_URL" --metrics-secret "$METRICS_SECRET"
 fi
 
 exec /lm-proxy "$@"
