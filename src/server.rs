@@ -84,6 +84,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::config::MetricsConfig;
     use crate::config::Upstream;
     use axum::{
         body::Body,
@@ -98,7 +99,7 @@ mod tests {
                 url: upstream_url,
             }],
             listen_addr: SocketAddr::from(([0, 0, 0, 0], 3000)),
-            metrics_url: None,
+            metrics: None,
         }
     }
 
@@ -120,7 +121,10 @@ mod tests {
                 url: "https://api.anthropic.com".to_string(),
             }],
             listen_addr: SocketAddr::from(([127, 0, 0, 1], 8080)),
-            metrics_url: Some("http://localhost:9090/metrics".to_string()),
+            metrics: Some(MetricsConfig {
+                url: "http://localhost:9090/metrics".to_string(),
+                secret: "test-secret".to_string(),
+            }),
         };
         let client = reqwest::Client::new();
         let proxy = ProxyService::new(client, config);

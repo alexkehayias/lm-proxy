@@ -10,7 +10,7 @@ An HTTP proxy server that sits between clients and OpenAI and Anthropic API conf
   - OpenAI completion endpoints
   - OpenAI embedding endpoints
   - Anthropic `/v1/messages` API (both streaming and non-streaming)
-- **Metrics Posting**: Optionally posts token counts to an external metrics endpoint for aggregation
+- **Metrics Posting**: Optionally posts signed token counts to a webhook endpoint for aggregation
 - **Streaming Support**: Handles both streaming (SSE) and non-streaming responses correctly
 - **Header Filtering**: Automatically filters out hop-by-hop headers that shouldn't be forwarded
 - **Preserves Metadata**: Maintains HTTP methods, query parameters, and custom headers during proxying
@@ -34,12 +34,17 @@ The proxy can be configured via command-line arguments:
 
 ### Arguments
 
-| Flag            | Default                     | Description                                                      |
-|-----------------|-----------------------------|------------------------------------------------------------------|
-| `--upstream`    | `https://api.openai.com/v1` | Repeatable: `name=url` or bare URL. See examples below.          |
-| `--host`        | `0.0.0.0`                   | The host address the proxy should listen on                      |
-| `--port`        | `3000`                      | The port the proxy should listen on                              |
-| `--metrics-url` | (none)                      | Optional URL to post usage metrics to                            |
+| Flag               | Default                     | Description                                                      |
+|--------------------|-----------------------------|------------------------------------------------------------------|
+| `--upstream`       | `https://api.openai.com/v1` | Repeatable: `name=url` or bare URL. See examples below.          |
+| `--host`           | `0.0.0.0`                   | The host address the proxy should listen on                      |
+| `--port`           | `3000`                      | The port the proxy should listen on                              |
+| `--metrics-url`    | (none)                      | Optional URL to post usage metrics to                            |
+| `--metrics-secret` | (none)                      | Shared secret used to sign metrics posts. Required with `--metrics-url` |
+
+When running the Docker image, `METRICS_URL` and `METRICS_SECRET` are read from
+the environment and passed through as the corresponding flags. Setting
+`METRICS_URL` without `METRICS_SECRET` is a startup error.
 
 ### Multi-Upstream Routing
 
@@ -76,8 +81,8 @@ cargo run
 # Proxy requests to a custom upstream server
 cargo run -- --upstream http://localhost:8080/api --host localhost --port 3000
 
-# With metrics posting to an external endpoint
-cargo run -- --metrics-url http://localhost:8080/metrics
+# With metrics posting to a signed webhook endpoint
+cargo run -- --metrics-url https://<webhook-proxy-url>/lm-proxy --metrics-secret "$WEBHOOK_SECRET"
 
 # Multiple upstreams (path-based routing)
 cargo run -- \
@@ -169,6 +174,13 @@ When `--metrics-url` is configured, the proxy POSTs a JSON payload to the specif
 ```
 
 Metrics are posted asynchronously (fire-and-forget) to avoid impacting request latency.
+
+Every post is signed with HMAC-SHA256 so the receiving proxy can authenticate it before accepting it:
+
+- `X-Webhook-Timestamp: <unix seconds>`
+- `X-Webhook-Signature: sha256=<hex HMAC-SHA256 of "<timestamp>.<raw body>">`
+
+The HMAC key is `--metrics-secret` and must match the shared secret configured on the receiving proxy. The body is serialized once and those exact bytes are both signed and sent. Receivers typically reject timestamps more than ±5 minutes from now, so the proxy host's clock must be reasonably accurate (NTP).
 
 #### Streaming Caveat: Per-Chunk Double-Counting
 

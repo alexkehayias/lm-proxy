@@ -12,7 +12,7 @@ fn create_test_config(upstream_url: String) -> Config {
             url: upstream_url,
         }],
         listen_addr: std::net::SocketAddr::from(([0, 0, 0, 0], 3000)),
-        metrics_url: None,
+        metrics: None,
     }
 }
 
