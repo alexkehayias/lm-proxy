@@ -28,7 +28,11 @@ ARG PORT=4000
 # Example: --build-arg UPSTREAM="openai=https://api.openai.com/v1 anthropic=https://api.anthropic.com/v1"
 ARG UPSTREAM
 ARG METRICS_URL
-ENV HOST=${HOST} PORT=${PORT} UPSTREAM=${UPSTREAM} METRICS_URL=${METRICS_URL}
+# Must accompany METRICS_URL. Prefer setting it at runtime (docker run -e
+# METRICS_SECRET=...) so the value isn't baked into the image; the build arg
+# mirrors the other config knobs.
+ARG METRICS_SECRET
+ENV HOST=${HOST} PORT=${PORT} UPSTREAM=${UPSTREAM} METRICS_URL=${METRICS_URL} METRICS_SECRET=${METRICS_SECRET}
 COPY entrypoint.sh /entrypoint.sh
 RUN ["chmod", "+x", "/entrypoint.sh"]
 

@@ -43,8 +43,9 @@ The proxy can be configured via command-line arguments:
 | `--metrics-secret` | (none)                      | Shared secret used to sign metrics posts. Required with `--metrics-url` |
 
 When running the Docker image, `METRICS_URL` and `METRICS_SECRET` are read from
-the environment and passed through as the corresponding flags. Setting
-`METRICS_URL` without `METRICS_SECRET` is a startup error.
+the environment (or passed as build args, like `UPSTREAM`). Setting
+`METRICS_URL` without `METRICS_SECRET` is a startup error. Prefer supplying the
+secret at runtime so it isn't baked into the image.
 
 ### Multi-Upstream Routing
 
